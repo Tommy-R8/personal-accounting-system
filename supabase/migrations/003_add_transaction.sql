@@ -21,6 +21,10 @@ declare
   v_valid text;
   v_row transactions%rowtype;
 begin
+  if p_type not in ('inflow','outflow') then
+    raise exception 'invalid type "%" — must be inflow or outflow', p_type;
+  end if;
+
   select * into v_cat
     from categories
    where lower(name) = lower(trim(p_category)) and active;
