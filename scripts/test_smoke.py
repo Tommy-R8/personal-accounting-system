@@ -22,6 +22,8 @@ def cleanup():
     # children first: reimbursements reference their parent via FK
     try_delete("transactions", {"source": "eq.test", "parent_id": "not.is.null"})
     try_delete("transactions", {"source": "eq.test"})
+    try_delete("invoices", {"source": "eq.test"})
+    try_delete("conversions", {"source": "eq.test"})
 
 
 # --- Task 2: schema + seeds -------------------------------------------------
@@ -234,3 +236,92 @@ def test_run_report_rejects_non_select():
 def test_run_report_rejects_multi_statement():
     r = rpc("run_report", {"p_sql": "select 1; select 2"})
     assert r.status_code == 400
+
+
+# --- Task 6: fiscal schema + RPCs ---------------------------------------------
+
+def add_invoice(**kw):
+    payload = {
+        "p_issued_on": "2026-07-06",
+        "p_punto_venta": "9999",  # test PV — never collides with real 0001 numbers
+        "p_invoice_number": kw.pop("n", 1),
+        "p_amount_ars": 100000,
+        "p_source": "test",
+    }
+    payload.update(kw)
+    return rpc("add_invoice", payload)
+
+
+def add_conversion(**kw):
+    payload = {
+        "p_occurred_on": "2026-07-06",
+        "p_kind": "crypto_sale",
+        "p_ars_amount": 150000,
+        "p_usd_amount": 100,
+        "p_platform": "Wallet B",
+        "p_source": "test",
+    }
+    payload.update(kw)
+    return rpc("add_conversion", payload)
+
+
+def test_add_invoice_and_duplicate_rejected():
+    r1 = add_invoice(n=901)
+    assert r1.status_code == 200, r1.text
+    assert r1.json()["status"] == "issued"
+    r2 = add_invoice(n=901)
+    assert r2.status_code == 400
+    assert "already exists" in r2.json()["message"]
+
+
+def test_conversion_rate_effective_generated():
+    r = add_conversion(p_ars_amount=150000, p_usd_amount=100)
+    assert r.status_code == 200, r.text
+    assert abs(float(r.json()["rate_effective"]) - 1500.0) < 0.01
+
+
+def test_crypto_sale_requires_usd():
+    r = add_conversion(p_usd_amount=None)
+    assert r.status_code == 400
+    assert "usd_amount" in r.json()["message"]
+
+
+def test_bank_deposit_rejects_usd():
+    r = add_conversion(p_kind="bank_deposit", p_usd_amount=100)
+    assert r.status_code == 400
+    assert "usd_amount" in r.json()["message"]
+
+
+def test_bank_deposit_ok_without_usd():
+    r = add_conversion(p_kind="bank_deposit", p_usd_amount=None, p_platform="Bank A")
+    assert r.status_code == 200, r.text
+    assert r.json()["rate_effective"] is None
+
+
+def test_unknown_platform_lists_valid_ones():
+    r = add_conversion(p_platform="Binance")
+    assert r.status_code == 400
+    assert "valid platforms" in r.json()["message"]
+
+
+def test_brackets_seeded_current_scale():
+    rows = rest_get("monotributo_brackets", {"select": "category,annual_cap",
+                                             "valid_from": "eq.2026-01-01"})
+    assert len(rows) == 11  # A..K
+    d = next(r for r in rows if r["category"] == "D")
+    assert abs(float(d["annual_cap"]) - 26212853.42) < 0.01
+
+
+def test_suggest_invoices_properties():
+    r = rpc("suggest_invoices", {"p_target_ars": 1044320})
+    assert r.status_code == 200, r.text
+    amounts = [float(a) for a in r.json()]
+    assert all(a % 1000 == 0 for a in amounts)
+    assert all(75000 <= a <= 200000 for a in amounts)  # spec §13: EVERY amount
+    assert abs(sum(amounts) - 1044320) <= 500  # = target rounded to nearest 1000
+
+
+def test_suggest_invoices_small_target_single_invoice():
+    r = rpc("suggest_invoices", {"p_target_ars": 120000})
+    assert r.status_code == 200, r.text
+    assert [float(a) for a in r.json()] == [120000.0]
