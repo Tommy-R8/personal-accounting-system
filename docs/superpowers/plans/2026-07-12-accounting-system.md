@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the agent-agnostic accounting backend specified in `docs/superpowers/specs/2026-07-12-accounting-system-design.md` — Supabase database with validating RPCs, report views, daily Blue-rate job, Google Form bridge, and full migration from the old Google Sheet.
+**Goal:** Build the agent-agnostic accounting backend specified in `docs/superpowers/specs/2026-07-12-accounting-system-design.md` — Supabase database with validating RPCs, report views, daily Blue-rate job, the fiscal module (invoices, conversions, monotributo brackets), Google Form bridge, and full migration from both old workbooks (expense tracker + Facturación y Cobranzas).
 
-**Architecture:** All logic lives inside a free-tier Supabase Postgres (tables, triggers, RPCs, views, pg_cron job). Local Python scripts handle migrations-apply, rate backfill, sheet migration, and smoke tests over the REST API. An Apps Script bridges the Google Form. `docs/agent-playbook.md` is the agent-facing contract.
+**Architecture:** All logic lives inside a free-tier Supabase Postgres (tables, triggers, RPCs, views, pg_cron job). Local Python scripts handle migrations-apply, rate backfill, workbook migrations, and smoke tests over the REST API. An Apps Script bridges the Google Form. `docs/agent-playbook.md` is the agent-facing contract.
 
-**Tech Stack:** Supabase (Postgres 15+, PostgREST, pg_cron, `http` extension), Python 3.11+ (psycopg 3, requests, pytest, python-dotenv), Google Apps Script.
+**Tech Stack:** Supabase (Postgres 15+, PostgREST, pg_cron, `http` extension), Python 3.11+ (psycopg 3, requests, openpyxl, pytest, python-dotenv), Google Apps Script.
 
 **Conventions for the executor:**
 - All commands run **from the repo root** in PowerShell with the venv activated (Task 1 sets this up).
@@ -25,10 +25,9 @@
 - Create: `scripts/lib.py`
 - Create: `scripts/apply_migrations.py`
 
-- [ ] **Step 1: Create `.gitignore`**
+- [ ] **Step 1: Extend `.gitignore`** (it already exists with `data/` and `.env*` entries — append what's missing)
 
 ```gitignore
-.env
 .venv/
 __pycache__/
 *.pyc
@@ -42,6 +41,7 @@ psycopg[binary]>=3.1
 requests>=2.31
 python-dotenv>=1.0
 pytest>=8.0
+openpyxl>=3.1
 ```
 
 - [ ] **Step 3: Create `.env.example`**
@@ -244,8 +244,9 @@ def test_seed_categories():
 
 def test_seed_payment_methods():
     pms = rest_get("payment_methods", {"select": "name"})
-    assert len(pms) == 13
+    assert len(pms) == 15  # 13 payment methods + BBVA & Buenbit (conversion platforms)
     assert {"name": "Gnosis Pay"} in pms
+    assert {"name": "BBVA"} in pms
 
 
 def test_trigger_blocks_kind_mismatch_on_direct_insert():
@@ -368,10 +369,12 @@ insert into categories (name, kind) values
   ('Regalos recibidos', 'inflow'), ('Rendimientos', 'inflow'),
   ('Otros ingresos', 'inflow');
 
+-- The last two (BBVA = the bank account, Buenbit) exist as conversion platforms
+-- (spec §5.2/§5.7); the table doubles as the platform list.
 insert into payment_methods (name) values
   ('BBVA Crédito'), ('BBVA Débito'), ('MercadoPago Crédito'), ('Gnosis Pay'),
   ('Exa'), ('Lemon'), ('Ripio'), ('Brubank'), ('Belo Lux'), ('Belo'),
-  ('Peanut'), ('Cash'), ('USD Cash');
+  ('Peanut'), ('Cash'), ('USD Cash'), ('BBVA'), ('Buenbit');
 ```
 
 - [ ] **Step 4: Apply and run tests**
@@ -888,7 +891,468 @@ git commit -m "feat: report views with reimbursement netting, run_report RPC"
 
 ---
 
-### Task 6: Agent playbook
+### Task 6: Fiscal schema + RPCs — invoices, conversions, brackets
+
+**Files:**
+- Create: `supabase/migrations/005_fiscal_schema.sql`
+- Modify: `scripts/test_smoke.py` (extend cleanup fixture + append tests)
+
+- [ ] **Step 1: Extend the cleanup fixture in `scripts/test_smoke.py`**
+
+Replace the existing `cleanup` fixture body with:
+
+```python
+@pytest.fixture(autouse=True, scope="session")
+def cleanup():
+    yield
+    # children first: reimbursements reference their parent via FK
+    rest_delete("transactions", {"source": "eq.test", "parent_id": "not.is.null"})
+    rest_delete("transactions", {"source": "eq.test"})
+    rest_delete("invoices", {"source": "eq.test"})
+    rest_delete("conversions", {"source": "eq.test"})
+```
+
+- [ ] **Step 2: Append failing tests to `scripts/test_smoke.py`**
+
+```python
+# --- Task 6: fiscal schema + RPCs ---------------------------------------------
+
+def add_invoice(**kw):
+    payload = {
+        "p_issued_on": "2026-07-06",
+        "p_punto_venta": "9999",  # test PV — never collides with real 0001 numbers
+        "p_invoice_number": kw.pop("n", 1),
+        "p_amount_ars": 100000,
+        "p_source": "test",
+    }
+    payload.update(kw)
+    return rpc("add_invoice", payload)
+
+
+def add_conversion(**kw):
+    payload = {
+        "p_occurred_on": "2026-07-06",
+        "p_kind": "crypto_sale",
+        "p_ars_amount": 150000,
+        "p_usd_amount": 100,
+        "p_platform": "Belo",
+        "p_source": "test",
+    }
+    payload.update(kw)
+    return rpc("add_conversion", payload)
+
+
+def test_add_invoice_and_duplicate_rejected():
+    r1 = add_invoice(n=901)
+    assert r1.status_code == 200, r1.text
+    assert r1.json()["status"] == "issued"
+    r2 = add_invoice(n=901)
+    assert r2.status_code == 400
+    assert "already exists" in r2.json()["message"]
+
+
+def test_conversion_rate_effective_generated():
+    r = add_conversion(p_ars_amount=150000, p_usd_amount=100)
+    assert r.status_code == 200, r.text
+    assert abs(float(r.json()["rate_effective"]) - 1500.0) < 0.01
+
+
+def test_crypto_sale_requires_usd():
+    r = add_conversion(p_usd_amount=None)
+    assert r.status_code == 400
+    assert "usd_amount" in r.json()["message"]
+
+
+def test_bank_deposit_rejects_usd():
+    r = add_conversion(p_kind="bank_deposit", p_usd_amount=100)
+    assert r.status_code == 400
+    assert "usd_amount" in r.json()["message"]
+
+
+def test_bank_deposit_ok_without_usd():
+    r = add_conversion(p_kind="bank_deposit", p_usd_amount=None, p_platform="BBVA")
+    assert r.status_code == 200, r.text
+    assert r.json()["rate_effective"] is None
+
+
+def test_unknown_platform_lists_valid_ones():
+    r = add_conversion(p_platform="Binance")
+    assert r.status_code == 400
+    assert "valid platforms" in r.json()["message"]
+
+
+def test_brackets_seeded_current_scale():
+    rows = rest_get("monotributo_brackets", {"select": "category,annual_cap",
+                                             "valid_from": "eq.2026-01-01"})
+    assert len(rows) == 11  # A..K
+    d = next(r for r in rows if r["category"] == "D")
+    assert abs(float(d["annual_cap"]) - 26212853.42) < 0.01
+
+
+def test_suggest_invoices_properties():
+    r = rpc("suggest_invoices", {"p_target_ars": 1044320})
+    assert r.status_code == 200, r.text
+    amounts = [float(a) for a in r.json()]
+    assert all(a % 1000 == 0 for a in amounts)
+    assert all(a <= 200000 for a in amounts)
+    assert all(a >= 75000 for a in amounts[:-1])  # last one may be the remainder
+    assert abs(sum(amounts) - 1044320) < 1000
+
+
+def test_suggest_invoices_small_target_single_invoice():
+    r = rpc("suggest_invoices", {"p_target_ars": 120000})
+    assert r.status_code == 200, r.text
+    assert [float(a) for a in r.json()] == [120000.0]
+```
+
+- [ ] **Step 3: Run tests to verify they fail**
+
+Run: `python -m pytest scripts/test_smoke.py -v -k "invoice or conversion or bracket or suggest or deposit"`
+Expected: all new tests FAIL with 404 (tables/RPCs don't exist).
+
+- [ ] **Step 4: Create `supabase/migrations/005_fiscal_schema.sql`**
+
+```sql
+create table invoices (
+  id              uuid primary key default gen_random_uuid(),
+  issued_on       date not null,
+  punto_venta     text not null default '0001',
+  invoice_number  int not null,
+  amount_ars      numeric(14,2) not null check (amount_ars > 0),
+  status          text not null default 'issued'
+                    check (status in ('draft','issued','voided')),
+  cae             text,            -- ARCA-ready: null until WSFE integration
+  cae_expires_on  date,
+  notes           text,
+  source          text not null,
+  created_at      timestamptz not null default now(),
+  unique (punto_venta, invoice_number)
+);
+
+create table conversions (
+  id             uuid primary key default gen_random_uuid(),
+  occurred_on    date not null,
+  kind           text not null
+                   check (kind in ('crypto_sale','cash_sale','bank_deposit')),
+  ars_amount     numeric(14,2) not null check (ars_amount > 0),
+  usd_amount     numeric(14,2) check (usd_amount > 0),
+  rate_quoted    numeric,
+  rate_effective numeric generated always as
+                   (case when usd_amount is not null
+                         then ars_amount / usd_amount end) stored,
+  platform_id    int not null references payment_methods(id),
+  notes          text,
+  source         text not null,
+  created_at     timestamptz not null default now(),
+  check ((kind = 'bank_deposit') = (usd_amount is null))
+);
+
+create table monotributo_brackets (
+  category    text not null check (category in
+                ('A','B','C','D','E','F','G','H','I','J','K')),
+  valid_from  date not null,
+  annual_cap  numeric(14,2) not null check (annual_cap > 0),
+  primary key (category, valid_from)
+);
+
+alter table invoices enable row level security;
+alter table conversions enable row level security;
+alter table monotributo_brackets enable row level security;
+
+-- Verified caps from Tommy's Overview sheet (D–G, 2025 and 2026 scales).
+-- A–C and H–K for the current scale are filled at Step 5 (USER CHECKPOINT).
+insert into monotributo_brackets (category, valid_from, annual_cap) values
+  ('D', '2025-01-01', 22934610.05), ('E', '2025-01-01', 26977793.60),
+  ('F', '2025-01-01', 33809379.57), ('G', '2025-01-01', 40431835.35),
+  ('D', '2026-01-01', 26212853.42), ('E', '2026-01-01', 30833964.37),
+  ('F', '2026-01-01', 38642048.36), ('G', '2026-01-01', 46211109.37);
+
+create or replace function add_invoice(
+  p_issued_on date,
+  p_invoice_number int,
+  p_amount_ars numeric,
+  p_source text,
+  p_punto_venta text default '0001',
+  p_status text default 'issued',
+  p_notes text default null
+) returns invoices
+language plpgsql as $$
+declare
+  v_row invoices%rowtype;
+begin
+  if exists (select 1 from invoices
+              where punto_venta = p_punto_venta
+                and invoice_number = p_invoice_number) then
+    raise exception 'invoice %-% already exists',
+      p_punto_venta, lpad(p_invoice_number::text, 8, '0');
+  end if;
+  insert into invoices (issued_on, punto_venta, invoice_number, amount_ars,
+                        status, notes, source)
+  values (p_issued_on, p_punto_venta, p_invoice_number, p_amount_ars,
+          p_status, p_notes, p_source)
+  returning * into v_row;
+  return v_row;
+end $$;
+
+create or replace function add_conversion(
+  p_occurred_on date,
+  p_kind text,
+  p_ars_amount numeric,
+  p_platform text,
+  p_source text,
+  p_usd_amount numeric default null,
+  p_rate_quoted numeric default null,
+  p_notes text default null
+) returns conversions
+language plpgsql as $$
+declare
+  v_platform_id int;
+  v_valid text;
+  v_row conversions%rowtype;
+begin
+  if p_kind not in ('crypto_sale','cash_sale','bank_deposit') then
+    raise exception 'unknown kind "%" — valid kinds: crypto_sale, cash_sale, bank_deposit', p_kind;
+  end if;
+  if p_kind in ('crypto_sale','cash_sale') and p_usd_amount is null then
+    raise exception '% requires usd_amount (the USD/USDC sold)', p_kind;
+  end if;
+  if p_kind = 'bank_deposit' and p_usd_amount is not null then
+    raise exception 'bank_deposit must not carry usd_amount (no USD leg)';
+  end if;
+
+  select id into v_platform_id
+    from payment_methods
+   where lower(name) = lower(trim(p_platform)) and active;
+  if not found then
+    select string_agg(name, ', ' order by id) into v_valid
+      from payment_methods where active;
+    raise exception 'unknown platform "%" — valid platforms: %', p_platform, v_valid;
+  end if;
+
+  insert into conversions (occurred_on, kind, ars_amount, usd_amount,
+                           rate_quoted, platform_id, notes, source)
+  values (p_occurred_on, p_kind, p_ars_amount, p_usd_amount,
+          p_rate_quoted, v_platform_id, p_notes, p_source)
+  returning * into v_row;
+  return v_row;
+end $$;
+
+-- Replaces the sheet's ROUND(RANDBETWEEN(75000;200000);-3) workflow: a set of
+-- invoice amounts covering a deposit target. Suggestion only — writes nothing.
+create or replace function suggest_invoices(
+  p_target_ars numeric,
+  p_min numeric default 75000,
+  p_max numeric default 200000
+) returns numeric[]
+language plpgsql volatile as $$
+declare
+  v_remaining numeric := p_target_ars;
+  v_amounts numeric[] := '{}';
+  v_pick numeric;
+begin
+  if p_target_ars <= 0 then
+    raise exception 'target must be positive';
+  end if;
+  if p_min <= 0 or p_max < p_min then
+    raise exception 'need 0 < p_min <= p_max';
+  end if;
+  while v_remaining > p_max loop
+    v_pick := round((p_min + random() * (p_max - p_min)) / 1000) * 1000;
+    if v_remaining - v_pick between 1 and p_min - 1 then
+      v_pick := floor((v_remaining - p_min) / 1000) * 1000;  -- keep remainder >= min
+    end if;
+    v_pick := greatest(v_pick, floor(p_min / 1000) * 1000 + 1000);
+    v_amounts := v_amounts || v_pick;
+    v_remaining := v_remaining - v_pick;
+  end loop;
+  if v_remaining > 0 then
+    v_amounts := v_amounts || round(v_remaining / 1000) * 1000;
+  end if;
+  return v_amounts;
+end $$;
+
+grant execute on function add_invoice(date, int, numeric, text, text, text, text)
+  to service_role;
+grant execute on function add_conversion(
+  date, text, numeric, text, text, numeric, numeric, text) to service_role;
+grant execute on function suggest_invoices(numeric, numeric, numeric) to service_role;
+```
+
+- [ ] **Step 5: USER CHECKPOINT — complete the bracket seeds**
+
+The migration seeds only D–G (the categories visible in Tommy's Overview sheet,
+values verified). Ask Tommy for the full current ARCA scale (categories A–K with
+their annual caps — he offered to provide the whole table), or look it up on
+ARCA's monotributo page and have him confirm. Add the missing rows as
+`supabase/migrations/006_bracket_seeds.sql` with `valid_from = '2026-01-01'`
+(adjust if the current scale's effective date differs — confirm with Tommy).
+The `test_brackets_seeded_current_scale` test expects 11 categories for that date.
+
+- [ ] **Step 6: Apply and run tests**
+
+Run:
+```powershell
+python scripts/apply_migrations.py
+python -m pytest scripts/test_smoke.py -v
+```
+Expected: `apply 005_fiscal_schema.sql`, `apply 006_bracket_seeds.sql`; all tests PASS.
+
+- [ ] **Step 7: Commit**
+
+```powershell
+git add supabase/migrations/005_fiscal_schema.sql supabase/migrations/006_bracket_seeds.sql scripts/test_smoke.py
+git commit -m "feat: fiscal module schema and RPCs — invoices, conversions, brackets, suggest_invoices"
+```
+
+---
+
+### Task 7: Fiscal views — deposit status, monotributo status, fiscal balance
+
+**Files:**
+- Create: `supabase/migrations/007_fiscal_views.sql`
+- Modify: `scripts/test_smoke.py` (append tests)
+
+- [ ] **Step 1: Append failing tests to `scripts/test_smoke.py`**
+
+```python
+# --- Task 7: fiscal views -------------------------------------------------------
+
+def _deposit_status():
+    return {k: float(v) for k, v in rest_get("v_deposit_status")[0].items()}
+
+
+def test_deposit_status_metrics_move_correctly():
+    """Insert a known fixture and assert the five §5.9 metric deltas."""
+    before = _deposit_status()
+    add_invoice(n=902, p_amount_ars=300000)
+    add_conversion(p_kind="crypto_sale", p_ars_amount=100000, p_usd_amount=70)
+    add_conversion(p_kind="cash_sale", p_ars_amount=50000, p_usd_amount=35,
+                   p_platform="Cash")
+    add_conversion(p_kind="bank_deposit", p_ars_amount=20000, p_usd_amount=None,
+                   p_platform="BBVA")
+    after = _deposit_status()
+    assert after["total_facturado"] - before["total_facturado"] == 300000
+    assert after["total_depositado"] - before["total_depositado"] == 120000  # crypto+deposit
+    assert after["total_cobrado"] - before["total_cobrado"] == 150000        # crypto+cash
+    assert after["restante_por_depositar"] - before["restante_por_depositar"] == 180000
+    assert after["disponible_para_depositar"] - before["disponible_para_depositar"] == 30000
+
+
+def test_monotributo_status_shape_and_math():
+    rows = rest_get("v_monotributo_status")
+    assert len(rows) == 11  # one per category of the current scale
+    d = next(r for r in rows if r["category"] == "D")
+    assert float(d["max_monthly_avg"]) == round(float(d["annual_cap"]) / 12, 2)
+    assert isinstance(d["cap_exceeded"], bool)
+
+
+def test_fiscal_balance_view_shape():
+    rows = rest_get("v_fiscal_balance", {"order": "month.desc", "limit": "1"})
+    assert set(rows[0].keys()) >= {"month", "invoiced_ars", "blanco_spend_ars",
+                                   "invoiced_cum", "blanco_cum"}
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `python -m pytest scripts/test_smoke.py -v -k "deposit_status or monotributo or fiscal_balance"`
+Expected: new tests FAIL (views missing).
+
+- [ ] **Step 3: Create `supabase/migrations/007_fiscal_views.sql`**
+
+```sql
+-- The five §5.9 metrics, cumulative over all time. Formulas verified against
+-- Tommy's Overview sheet to the peso (spec §5.9).
+create view v_deposit_status as
+with inv as (
+  select coalesce(sum(amount_ars), 0) as facturado
+    from invoices where status = 'issued'
+), conv as (
+  select coalesce(sum(ars_amount) filter
+           (where kind in ('crypto_sale','bank_deposit')), 0) as depositado,
+         coalesce(sum(ars_amount) filter
+           (where kind in ('crypto_sale','cash_sale')), 0) as cobrado
+    from conversions
+)
+select inv.facturado               as total_facturado,
+       conv.depositado             as total_depositado,
+       conv.cobrado                as total_cobrado,
+       inv.facturado - conv.depositado as restante_por_depositar,
+       conv.cobrado - conv.depositado  as disponible_para_depositar
+from inv, conv;
+
+-- One row per category of the CURRENT scale (latest valid_from <= today),
+-- compared against the 12-month-rolling invoiced total.
+create view v_monotributo_status as
+with current_scale as (
+  select category, annual_cap
+    from monotributo_brackets
+   where valid_from = (select max(valid_from) from monotributo_brackets
+                        where valid_from <= current_date)
+), rolling as (
+  select coalesce(sum(amount_ars), 0) as invoiced_12m
+    from invoices
+   where status = 'issued'
+     and issued_on > current_date - interval '12 months'
+)
+select cs.category,
+       cs.annual_cap,
+       r.invoiced_12m,
+       cs.annual_cap - r.invoiced_12m       as headroom,
+       round(cs.annual_cap / 12, 2)         as max_monthly_avg,
+       round(r.invoiced_12m / 12, 2)        as actual_monthly_avg,
+       r.invoiced_12m > cs.annual_cap       as cap_exceeded
+from current_scale cs cross join rolling r
+order by cs.annual_cap;
+
+-- Invoiced vs spent en Blanco, per month + cumulative, in ARS. Outflows are
+-- GROSS (no reimbursement netting): this view tracks registered money movement,
+-- not personal cost. USD outflows convert at their snapshotted rate.
+create view v_fiscal_balance as
+with inv as (
+  select date_trunc('month', issued_on)::date as m, sum(amount_ars) as invoiced
+    from invoices where status = 'issued' group by 1
+), sp as (
+  select date_trunc('month', occurred_on)::date as m,
+         sum(case when currency = 'ARS' then amount
+                  else amount * usd_rate end) as blanco
+    from transactions
+   where type = 'outflow' and fiscal
+   group by 1
+)
+select coalesce(inv.m, sp.m)                       as month,
+       coalesce(inv.invoiced, 0)                   as invoiced_ars,
+       round(coalesce(sp.blanco, 0), 2)            as blanco_spend_ars,
+       sum(coalesce(inv.invoiced, 0))
+         over (order by coalesce(inv.m, sp.m))     as invoiced_cum,
+       round(sum(coalesce(sp.blanco, 0))
+         over (order by coalesce(inv.m, sp.m)), 2) as blanco_cum
+from inv full outer join sp on inv.m = sp.m
+order by 1;
+
+alter view v_deposit_status set (security_invoker = true);
+alter view v_monotributo_status set (security_invoker = true);
+alter view v_fiscal_balance set (security_invoker = true);
+```
+
+- [ ] **Step 4: Apply and run the full suite**
+
+Run:
+```powershell
+python scripts/apply_migrations.py
+python -m pytest scripts/test_smoke.py -v
+```
+Expected: `apply 007_fiscal_views.sql`; **all** tests PASS.
+
+- [ ] **Step 5: Commit**
+
+```powershell
+git add supabase/migrations/007_fiscal_views.sql scripts/test_smoke.py
+git commit -m "feat: fiscal views — deposit status, monotributo brackets, invoiced vs blanco"
+```
+
+---
+
+### Task 8: Agent playbook
 
 **Files:**
 - Create: `docs/agent-playbook.md`
@@ -963,6 +1427,11 @@ Views (read with GET + PostgREST filters):
 - `v_transactions` — everything, joined names, `net_amount_usd`
 - `v_monthly_summary` — month × type × category × fiscal → `total_usd`, `tx_count`
 - `v_group_expenses` — group outflows: `gross_usd`, `reimbursed_usd`, `net_usd`
+- `v_deposit_status` — single row: Total Facturado / Depositado / Cobrado,
+  Restante por Depositar, Disponible para Depositar (all ARS, cumulative)
+- `v_monotributo_status` — one row per bracket category: cap, 12-month invoiced,
+  headroom, monthly averages, `cap_exceeded`
+- `v_fiscal_balance` — per month: `invoiced_ars` vs `blanco_spend_ars` + cumulatives
 
 Examples:
 ```
@@ -977,6 +1446,40 @@ Anything the views can't express — ad-hoc SQL (single SELECT only):
 **Report conventions:** amounts in USD (`net_amount_usd` / `total_usd`);
 reimbursement rows (`parent_id` set) are already excluded from summaries and
 netted into their parent's month.
+
+## Fiscal module (invoices & conversions)
+
+**Recording an invoice** (Tommy issued a factura in ARCA and tells you about it):
+`POST /rest/v1/rpc/add_invoice` with `p_issued_on`, `p_invoice_number` (int, e.g. 218),
+`p_amount_ars`, `p_source`. `p_punto_venta` defaults to `"0001"`.
+
+**Recording a conversion** — three kinds (`p_kind`):
+- `crypto_sale`: sold USDC for ARS on an exchange → needs `p_usd_amount` and
+  `p_platform` (Belo, Ripio, Buenbit...). The ARS is en blanco immediately.
+- `cash_sale`: sold USD/USDC for ARS *cash* via dealer → `p_usd_amount`,
+  `p_platform: "Cash"`.
+- `bank_deposit`: deposited ARS cash into a bank → NO `p_usd_amount`,
+  `p_platform` = the bank (e.g. "BBVA").
+`POST /rest/v1/rpc/add_conversion` with `p_occurred_on`, `p_ars_amount`, plus the
+above. Optional `p_rate_quoted` if Tommy mentions the quoted rate.
+
+**Conversions are NOT income.** Salary arriving in USDC is an inflow transaction
+(`add_transaction`, category Sueldo, currency USD); selling that USDC later is a
+conversion. Never create both from one event.
+
+**Suggesting invoices to cover a deposit target:**
+`POST /rest/v1/rpc/suggest_invoices` with `{"p_target_ars": <amount>}`
+(optional `p_min`/`p_max`, defaults 75,000/200,000). Returns an array of amounts.
+Typical flow: read `v_deposit_status` → propose covering `disponible_para_depositar`
+or a user-given target → show Tommy the suggested amounts → he issues them in ARCA →
+record each with `add_invoice`. **Never record an invoice he didn't confirm as
+actually issued.**
+
+**Typical fiscal questions** → which surface:
+- "¿Cuánto me queda por depositar?" → `v_deposit_status.restante_por_depositar`
+- "¿Cómo vengo con el monotributo?" → `v_monotributo_status` (watch `cap_exceeded`
+  and `headroom` of his current category)
+- "¿Facturé más de lo que gasté en blanco?" → `v_fiscal_balance`
 
 ## Statement import workflow
 
@@ -1012,10 +1515,14 @@ curl -s -X POST "$SUPABASE_URL/rest/v1/rpc/add_transaction" \
 
 From a fresh context (or as literally as possible: using ONLY the playbook, not this
 plan), perform: add an ARS outflow → add a linked Reintegro → query
-`v_group_expenses` for it → run one `run_report` query → delete the test rows:
+`v_group_expenses` for it → add an invoice (punto de venta 9999) → add a
+crypto_sale conversion → read `v_deposit_status` → call `suggest_invoices` for
+500,000 → run one `run_report` query → delete the test rows:
 ```
 DELETE /rest/v1/transactions?source=eq.playbook-check&parent_id=not.is.null
 DELETE /rest/v1/transactions?source=eq.playbook-check
+DELETE /rest/v1/invoices?source=eq.playbook-check
+DELETE /rest/v1/conversions?source=eq.playbook-check
 ```
 (using `p_source="playbook-check"` for all rows). If any step required knowledge
 not in the playbook, fix the playbook now.
@@ -1029,7 +1536,7 @@ git commit -m "docs: agent playbook — the agent-agnostic interface contract"
 
 ---
 
-### Task 7: Google Form bridge
+### Task 9: Google Form bridge
 
 **Files:**
 - Create: `apps-script/form-sync.gs`
@@ -1168,74 +1675,73 @@ Ask Tommy to (with the executor guiding):
 
 ---
 
-### Task 8: Migration from the old Google Sheet
+### Task 10: Migration — expense tracker workbook
 
 **Files:**
 - Create: `scripts/migrate_from_sheets.py`
 
-- [ ] **Step 1: USER CHECKPOINT — get the CSV export**
+The source structure was inspected on 2026-07-13 (spec §10.1): sheet
+`Respuestas de formulario 1`, columns `Marca temporal, Name, Category, Currency,
+Amount, ARCA, Blue USD Rate, USD Amount, Month`. Known data facts the script
+handles: 90 multi-category rows (9 pair combos), 4 rows without category, 19 rows
+with broken USD conversions (`#VALUE!` strings), 206 blank ARCA cells (→ Blanco).
 
-Ask Tommy to export the responses/data sheet as CSV (File → Download → CSV) and
-drop it in the repo root as `sheet-export.csv` (gitignored by adding a line
-`sheet-export.csv` to `.gitignore` — personal data stays out of git).
+- [ ] **Step 1: USER CHECKPOINT — get a fresh export**
 
-- [ ] **Step 2: Inspect the CSV header and adjust the CONFIG block**
+Ask Tommy to re-download the responses workbook as `.xlsx` (File → Download →
+Microsoft Excel) into `data/` (gitignored), replacing
+`data/Personal Expenses Tracker (responses).xlsx` — the sheet is in daily use, so
+migrate from a same-day snapshot.
 
-Run: `python -c "import csv; print(next(csv.reader(open('sheet-export.csv', encoding='utf-8-sig'))))"`
-Compare against the `COL_*` constants in the script (next step) and fix any that
-differ (column names, ARCA values, date format). This is expected configuration,
-not a deviation.
+- [ ] **Step 2: Verify the header still matches**
+
+Run: `python -c "import openpyxl; ws = openpyxl.load_workbook(r'data/Personal Expenses Tracker (responses).xlsx', read_only=True)['Respuestas de formulario 1']; print([c.value for c in next(ws.iter_rows(max_row=1))])"`
+Expected: the columns listed above. If they differ, update the `COL_*` indices in
+the script — expected configuration, not a deviation.
 
 - [ ] **Step 3: Create `scripts/migrate_from_sheets.py`**
 
 ```python
-"""Migrate the old Google Sheet into Supabase.
+"""Migrate the old expense tracker workbook into Supabase (spec §10.1).
 
 Usage:
-  python scripts/migrate_from_sheets.py sheet-export.csv            # dry run
-  python scripts/migrate_from_sheets.py sheet-export.csv --execute  # insert + reconcile
+  python scripts/migrate_from_sheets.py                # dry run
+  python scripts/migrate_from_sheets.py --execute      # insert + reconcile
 """
-import csv
 import sys
 from collections import defaultdict
 from datetime import datetime
 
+import openpyxl
+
 from lib import db_conn
 
-# ---- CONFIG: adjust to the CSV's actual headers/values (Task 8 Step 2) ------
-COL_TIMESTAMP = "Timestamp"
-COL_DESCRIPTION = "Name"
-COL_CATEGORY = "Category"       # comma-separated when multiple boxes were ticked
-COL_ARCA = "ARCA"
-COL_CURRENCY = "Currency"
-COL_AMOUNT = "Amount"
-COL_USD = "USD"                 # the sheet's per-row USD conversion column
-ARCA_NEGRO_VALUES = {"negro", "no"}          # lowercase values meaning fiscal=False
-DATE_FORMATS = ("%m/%d/%Y %H:%M:%S", "%d/%m/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S")
-CATEGORY_MAP = {                # old sheet name -> new category name
+XLSX = "data/Personal Expenses Tracker (responses).xlsx"
+SHEET = "Respuestas de formulario 1"
+
+# ---- CONFIG (verified against the workbook on 2026-07-13) --------------------
+# 0-based column indices: Marca temporal, Name, Category, Currency, Amount,
+#                         ARCA, Blue USD Rate, USD Amount, Month
+I_TS, I_NAME, I_CAT, I_CUR, I_AMOUNT, I_ARCA, I_RATE, I_USD, I_MONTH = range(9)
+ARCA_NEGRO_VALUES = {"negro"}   # blank/None/'Blanco' -> fiscal=True
+CATEGORY_MAP = {                # old sheet name -> new category name (1:1 today)
     "Comida": "Comida", "Salidas": "Salidas", "Transporte": "Transporte",
     "Compras": "Compras", "Regalos": "Regalos", "Suscripciones": "Suscripciones",
     "Impuestos": "Impuestos",
 }
-COMBO_RULES = {                 # frozenset of NEW names -> winning category
+COMBO_RULES = {                 # frozenset of NEW names -> winning category.
+    # Pre-seeded from the data (44 + 27 rows); the remaining 7 combos (19 rows)
+    # get rules here during the dry-run review with Tommy.
     frozenset({"Comida", "Salidas"}): "Salidas",
+    frozenset({"Compras", "Regalos"}): "Regalos",
 }
-# -----------------------------------------------------------------------------
-
-
-def parse_date(ts):
-    for fmt in DATE_FORMATS:
-        try:
-            return datetime.strptime(ts.strip(), fmt).date()
-        except ValueError:
-            continue
-    raise ValueError(f"unparseable timestamp: {ts!r}")
+# -------------------------------------------------------------------------------
 
 
 def resolve_category(raw):
-    names = [CATEGORY_MAP[c.strip()] for c in raw.split(",") if c.strip()]
-    if not names:
-        raise ValueError("row has no category")
+    if not raw or not str(raw).strip():
+        raise ValueError("row has no category — assign one manually")
+    names = [CATEGORY_MAP[c.strip()] for c in str(raw).split(",") if c.strip()]
     if len(names) == 1:
         return names[0], []
     winner = COMBO_RULES.get(frozenset(names), names[0])
@@ -1243,33 +1749,68 @@ def resolve_category(raw):
     return winner, tags
 
 
-def load_rows(path):
+def fetch_rates():
+    """Backfilled Blue sell rates, for rows whose sheet conversion is broken."""
+    with db_conn() as conn, conn.cursor() as cur:
+        cur.execute("select rate_date, blue_sell from fx_rates order by rate_date")
+        return cur.fetchall()  # ascending [(date, rate), ...]
+
+
+def sell_rate_on(rates, day):
+    """Latest rate on or before `day` (same fallback rule as add_transaction)."""
+    best = None
+    for rate_date, rate in rates:
+        if rate_date > day:
+            break
+        best = rate
+    if best is None:
+        raise ValueError(f"no Blue rate on or before {day}")
+    return float(best)
+
+
+def load_rows():
+    rates = fetch_rates()
+    ws = openpyxl.load_workbook(XLSX, read_only=True, data_only=True)[SHEET]
     rows, problems = [], []
-    with open(path, newline="", encoding="utf-8-sig") as f:
-        for lineno, r in enumerate(csv.DictReader(f), start=2):
-            try:
-                amount = float(str(r[COL_AMOUNT]).replace(",", ""))
-                usd = float(str(r[COL_USD]).replace(",", ""))
-                currency = (r[COL_CURRENCY] or "ARS").strip().upper()
-                category, tags = resolve_category(r[COL_CATEGORY])
-                fiscal = str(r[COL_ARCA]).strip().lower() not in ARCA_NEGRO_VALUES
-                usd_rate = 1.0 if currency == "USD" else amount / usd
-                rows.append(dict(
-                    occurred_on=parse_date(r[COL_TIMESTAMP]),
-                    description=r[COL_DESCRIPTION].strip() or "(sin descripción)",
-                    category=category, tags=tags, amount=amount, currency=currency,
-                    fiscal=fiscal, usd=usd, usd_rate=usd_rate, line=lineno,
-                ))
-            except Exception as e:  # noqa: BLE001 — report every bad row, don't die
-                problems.append((lineno, str(e)))
+    for lineno, r in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+        if r[I_TS] is None:
+            continue  # trailing blank rows
+        try:
+            occurred_on = r[I_TS].date()
+            amount = float(r[I_AMOUNT])
+            currency = (str(r[I_CUR] or "ARS")).strip().upper()
+            category, tags = resolve_category(r[I_CAT])
+            arca = str(r[I_ARCA] or "").strip().lower()
+            fiscal = arca not in ARCA_NEGRO_VALUES
+            repaired = False
+            if currency == "USD":
+                usd, usd_rate = amount, 1.0
+            elif isinstance(r[I_USD], (int, float)):
+                usd = float(r[I_USD])           # the sheet's own conversion
+                usd_rate = amount / usd
+            else:
+                # 19 known rows: Bluelytics 429 error text / #VALUE! in the sheet.
+                usd_rate = sell_rate_on(rates, occurred_on)
+                usd = amount / usd_rate
+                repaired = True
+            rows.append(dict(
+                occurred_on=occurred_on,
+                description=str(r[I_NAME] or "").strip() or "(sin descripción)",
+                category=category, tags=tags, amount=amount, currency=currency,
+                fiscal=fiscal, usd=usd, usd_rate=usd_rate, repaired=repaired,
+                line=lineno,
+            ))
+        except Exception as e:  # noqa: BLE001 — report every bad row, don't die
+            problems.append((lineno, f"{r[I_NAME]!r}: {e}"))
     return rows, problems
 
 
 def dry_run_report(rows, problems):
     multi = [r for r in rows if r["tags"]]
+    repaired = [r for r in rows if r["repaired"]]
     print(f"\n=== DRY RUN — {len(rows)} importable rows, {len(problems)} problems ===")
     if problems:
-        print("\n-- Problem rows (fix in CSV or CONFIG, then rerun) --")
+        print("\n-- Problem rows (fix in workbook or CONFIG, then rerun) --")
         for lineno, msg in problems:
             print(f"  line {lineno}: {msg}")
     if multi:
@@ -1277,10 +1818,16 @@ def dry_run_report(rows, problems):
         for r in multi:
             print(f"  line {r['line']:5} {r['occurred_on']} "
                   f"{r['description'][:40]:40} -> {r['category']} tags={r['tags']}")
+    if repaired:
+        print(f"\n-- Repaired-rate rows ({len(repaired)}) — sheet conversion was "
+              "broken; recomputed from fx_rates --")
+        for r in repaired:
+            print(f"  line {r['line']:5} {r['occurred_on']} "
+                  f"{r['description'][:40]:40} rate={r['usd_rate']:.2f}")
     per_month = defaultdict(float)
     for r in rows:
         per_month[r["occurred_on"].strftime("%Y-%m")] += r["usd"]
-    print("\n-- Per-month USD totals (from the sheet's own conversion) --")
+    print("\n-- Per-month USD totals --")
     for m in sorted(per_month):
         print(f"  {m}  {per_month[m]:12.2f}")
     print("\nRe-run with --execute to insert.")
@@ -1304,19 +1851,30 @@ def insert_rows(rows):
 
 
 def reconcile(rows):
+    # Repaired rows are excluded: their sheet value is unusable by definition
+    # (spec §10.1), so they can't participate in a sheet-vs-db comparison.
+    clean = [r for r in rows if not r["repaired"]]
     per_month_sheet = defaultdict(float)
-    for r in rows:
+    for r in clean:
         per_month_sheet[r["occurred_on"].strftime("%Y-%m")] += r["usd"]
     with db_conn() as conn, conn.cursor() as cur:
         cur.execute(
-            """select to_char(occurred_on, 'YYYY-MM'), sum(amount_usd)
-                 from transactions where source = 'migration' group by 1"""
+            """select to_char(t.occurred_on, 'YYYY-MM'), sum(t.amount_usd)
+                 from transactions t
+                where t.source = 'migration'
+                group by 1"""
         )
         per_month_db = {m: float(t) for m, t in cur.fetchall()}
+    # db totals include repaired rows; subtract their recomputed USD per month
+    repaired_by_month = defaultdict(float)
+    for r in rows:
+        if r["repaired"]:
+            repaired_by_month[r["occurred_on"].strftime("%Y-%m")] += r["usd"]
     print(f"\n{'month':8} {'sheet_usd':>12} {'db_usd':>12} {'diff%':>8}")
     worst = 0.0
     for m in sorted(per_month_sheet):
-        s, d = per_month_sheet[m], per_month_db.get(m, 0.0)
+        s = per_month_sheet[m]
+        d = per_month_db.get(m, 0.0) - repaired_by_month.get(m, 0.0)
         diff = abs(s - d) / s * 100 if s else 0.0
         worst = max(worst, diff)
         print(f"{m:8} {s:12.2f} {d:12.2f} {diff:8.3f}")
@@ -1325,9 +1883,7 @@ def reconcile(rows):
 
 
 def main():
-    if len(sys.argv) < 2:
-        sys.exit(__doc__)
-    rows, problems = load_rows(sys.argv[1])
+    rows, problems = load_rows()
     if "--execute" not in sys.argv:
         dry_run_report(rows, problems)
         return
@@ -1344,18 +1900,21 @@ if __name__ == "__main__":
 
 - [ ] **Step 4: Dry run**
 
-Run: `python scripts/migrate_from_sheets.py sheet-export.csv`
-Expected: zero problem rows (fix CONFIG/CSV and rerun until so), the multi-category
-table, and per-month totals that eyeball-match the old sheet.
+Run: `python scripts/migrate_from_sheets.py`
+Expected: ~4 problem rows (the known no-category rows — resolved at Step 5), the
+multi-category table (~90 rows), ~19 repaired-rate rows, and per-month totals that
+eyeball-match the old sheet.
 
 - [ ] **Step 5: USER CHECKPOINT — Tommy reviews the dry run**
 
-Show Tommy the multi-category rows and the problems list. Adjust `COMBO_RULES`
-per his answers and rerun the dry run until he approves.
+Show Tommy: (a) the multi-category rows — agree `COMBO_RULES` for the 7 undecided
+combos; (b) the no-category rows — he assigns categories (fix the cells in the
+workbook or hardcode per-line overrides); (c) the repaired-rate list, for
+awareness. Rerun the dry run until he approves and problems reach zero.
 
 - [ ] **Step 6: Execute and reconcile**
 
-Run: `python scripts/migrate_from_sheets.py sheet-export.csv --execute`
+Run: `python scripts/migrate_from_sheets.py --execute`
 Expected: `inserted N rows`, then the reconciliation table ending in
 `RECONCILIATION PASS`. If FAIL: investigate the worst month (usually a row the
 sheet's USD formula had errored on), fix, and — since this must stay re-runnable —
@@ -1371,13 +1930,199 @@ Expected: recent months with sane USD totals.
 - [ ] **Step 8: Commit**
 
 ```powershell
-git add scripts/migrate_from_sheets.py .gitignore
-git commit -m "feat: sheet migration with combo rules, dry-run report, reconciliation"
+git add scripts/migrate_from_sheets.py
+git commit -m "feat: expense sheet migration with combo rules, rate repair, dry-run report"
 ```
 
 ---
 
-### Task 9: Cutover
+### Task 11: Migration — Facturación y Cobranzas workbook
+
+**Files:**
+- Create: `scripts/migrate_facturacion.py`
+
+Source structure (inspected 2026-07-13, spec §10.2): sheet `Facturas` with
+`Fecha de Emisión, Mes, Año, Número de Factura ('0001-00000001'), Importe Total`
+(217 rows, clean); sheet `Cobranzas y Depósitos` with `Fecha, Mes, Año,
+Cantidad [ARS], Plataforma de Ingreso, Cantidad [USD], Tipo de Cambio,
+Precio Final, Notas` (22 rows). One known quirk: the Buenbit row's
+`Tipo de Cambio` holds the ARS amount, not a rate.
+
+- [ ] **Step 1: USER CHECKPOINT — get a fresh export**
+
+Ask Tommy to re-download the workbook as `.xlsx` into `data/`, replacing
+`data/Facturación y Cobranzas.xlsx`, and to confirm the Overview values at that
+moment (Total Facturado / Depositado / Cobrado, Restante, Disponible) — they are
+the reconciliation targets.
+
+- [ ] **Step 2: Create `scripts/migrate_facturacion.py`**
+
+```python
+"""Migrate the Facturación y Cobranzas workbook into Supabase (spec §10.2).
+
+Usage:
+  python scripts/migrate_facturacion.py                # dry run
+  python scripts/migrate_facturacion.py --execute      # insert + reconcile
+"""
+import sys
+from datetime import datetime
+
+import openpyxl
+
+from lib import db_conn
+
+XLSX = "data/Facturación y Cobranzas.xlsx"
+
+
+def load_invoices(wb):
+    rows = []
+    for r in wb["Facturas"].iter_rows(min_row=2, values_only=True):
+        if r[0] is None:
+            continue
+        pv, num = str(r[3]).split("-")
+        rows.append(dict(issued_on=r[0].date(), punto_venta=pv,
+                         invoice_number=int(num), amount_ars=float(r[4])))
+    return rows
+
+
+def classify(platform, usd):
+    """Kind rule, verified against every row of the sheet (spec §10.2)."""
+    if usd is None:
+        return "bank_deposit"
+    return "cash_sale" if platform == "Cash" else "crypto_sale"
+
+
+def load_conversions(wb):
+    rows, problems = [], []
+    for lineno, r in enumerate(
+            wb["Cobranzas y Depósitos"].iter_rows(min_row=2, values_only=True),
+            start=2):
+        if not isinstance(r[0], datetime):
+            continue  # trailing formula/blank rows
+        ars, platform, usd, tc, notas = r[3], str(r[4]).strip(), r[5], r[6], r[8]
+        try:
+            usd = float(usd) if isinstance(usd, (int, float)) else None
+            kind = classify(platform, usd)
+            # rate_quoted only when plausible (the Buenbit row holds the ARS
+            # amount in Tipo de Cambio -> import as null)
+            quoted = float(tc) if isinstance(tc, (int, float)) and tc < 100000 else None
+            rows.append(dict(occurred_on=r[0].date(), kind=kind,
+                             ars_amount=float(ars), usd_amount=usd,
+                             rate_quoted=quoted, platform=platform,
+                             notes=str(notas) if notas else None, line=lineno))
+        except Exception as e:  # noqa: BLE001
+            problems.append((lineno, str(e)))
+    return rows, problems
+
+
+def metrics(conversions, invoices):
+    dep = sum(c["ars_amount"] for c in conversions
+              if c["kind"] in ("crypto_sale", "bank_deposit"))
+    cob = sum(c["ars_amount"] for c in conversions
+              if c["kind"] in ("crypto_sale", "cash_sale"))
+    fac = sum(i["amount_ars"] for i in invoices)
+    return dict(facturado=fac, depositado=dep, cobrado=cob,
+                restante=fac - dep, disponible=cob - dep)
+
+
+def dry_run(invoices, conversions, problems):
+    print(f"\n=== DRY RUN — {len(invoices)} invoices, "
+          f"{len(conversions)} conversions, {len(problems)} problems ===")
+    for lineno, msg in problems:
+        print(f"  line {lineno}: {msg}")
+    print("\n-- Conversions classification --")
+    for c in conversions:
+        print(f"  line {c['line']:3} {c['occurred_on']} {c['kind']:12} "
+              f"ARS {c['ars_amount']:>13,.2f} {c['platform']:8} "
+              f"USD {c['usd_amount'] or 0:>9,.2f} quoted={c['rate_quoted']}")
+    print("\n-- Metrics computed from the rows (compare with the Overview tab) --")
+    for k, v in metrics(conversions, invoices).items():
+        print(f"  {k:12} {v:>15,.2f}")
+    print("\nRe-run with --execute to insert.")
+
+
+def insert_all(invoices, conversions):
+    with db_conn() as conn, conn.cursor() as cur:
+        cur.execute("select name, id from payment_methods")
+        pm_ids = dict(cur.fetchall())
+        cur.executemany(
+            """insert into invoices (issued_on, punto_venta, invoice_number,
+                                     amount_ars, source)
+               values (%(issued_on)s, %(punto_venta)s, %(invoice_number)s,
+                       %(amount_ars)s, 'migration')""",
+            invoices,
+        )
+        cur.executemany(
+            """insert into conversions (occurred_on, kind, ars_amount, usd_amount,
+                                        rate_quoted, platform_id, notes, source)
+               values (%(occurred_on)s, %(kind)s, %(ars_amount)s, %(usd_amount)s,
+                       %(rate_quoted)s, %(platform_id)s, %(notes)s, 'migration')""",
+            [dict(c, platform_id=pm_ids[c["platform"]]) for c in conversions],
+        )
+        conn.commit()
+    print(f"inserted {len(invoices)} invoices + {len(conversions)} conversions")
+
+
+def reconcile():
+    with db_conn() as conn, conn.cursor() as cur:
+        cur.execute("select * from v_deposit_status")
+        cols = [d[0] for d in cur.description]
+        print("\n-- v_deposit_status (must equal the Overview tab to the peso) --")
+        for k, v in zip(cols, cur.fetchone()):
+            print(f"  {k:28} {float(v):>15,.2f}")
+
+
+def main():
+    wb = openpyxl.load_workbook(XLSX, data_only=True)
+    invoices = load_invoices(wb)
+    conversions, problems = load_conversions(wb)
+    if "--execute" not in sys.argv:
+        dry_run(invoices, conversions, problems)
+        return
+    if problems:
+        sys.exit(f"refusing to execute with {len(problems)} problem rows")
+    insert_all(invoices, conversions)
+    reconcile()
+
+
+if __name__ == "__main__":
+    main()
+```
+
+- [ ] **Step 3: Dry run and review**
+
+Run: `python scripts/migrate_facturacion.py`
+Expected: 217 invoices, ~22+ conversions, zero problems; every row classified;
+the printed metrics match the workbook's Overview tab. Show Tommy the
+classification table for a quick eyeball.
+
+- [ ] **Step 4: Execute and reconcile**
+
+Run: `python scripts/migrate_facturacion.py --execute`
+Expected: insert counts, then `v_deposit_status` matching the Overview values
+Tommy confirmed at Step 1, to the peso. (Note: `v_deposit_status` reads ALL rows;
+at this point only migrated rows exist, so it's a clean comparison. If FAIL:
+delete and redo — `delete from invoices where source='migration'` and same for
+`conversions`.)
+
+- [ ] **Step 5: Also verify the bracket view against the Overview**
+
+Run: `python -c "import sys; sys.path.insert(0,'scripts'); from lib import rest_get; [print(r) for r in rest_get('v_monotributo_status')]"`
+Expected: for the categories shown in the Overview tab (D–G), `invoiced_12m` and
+the averages line up with the sheet's numbers (12-month window differences are
+expected if the sheet's period differs from rolling-12-months — eyeball, don't
+assert equality).
+
+- [ ] **Step 6: Commit**
+
+```powershell
+git add scripts/migrate_facturacion.py
+git commit -m "feat: facturación workbook migration with kind classification and metric reconciliation"
+```
+
+---
+
+### Task 12: Cutover
 
 **Files:**
 - Modify: `README.md` (status note)
@@ -1393,9 +2138,11 @@ backfill/tests (check `cron.job_run_details` via `run_report` if unsure:
 
 - [ ] **Step 2: USER CHECKPOINT — archive the old system**
 
-Ask Tommy to: rename the old spreadsheet to `[ARCHIVED] ...`, stop using its
-analysis tabs, and confirm the Form now feeds Supabase only (the Form → Sheet →
-Apps Script → Supabase chain keeps the sheet as a raw receipt log; that's fine).
+Ask Tommy to: rename BOTH old spreadsheets to `[ARCHIVED] ...` (the expense
+tracker and Facturación y Cobranzas), stop using their analysis/Overview tabs,
+and confirm the Form now feeds Supabase only (the Form → Sheet → Apps Script →
+Supabase chain keeps the sheet as a raw receipt log; that's fine). From now on
+invoices and conversions are logged through an agent (playbook §Fiscal module).
 
 - [ ] **Step 3: Final smoke pass**
 
@@ -1407,8 +2154,9 @@ Expected: all tests PASS.
 Append to `README.md`:
 ```markdown
 ## Status
-Live since 2026-07. Source of truth: Supabase. Old sheet archived read-only.
-Entry paths: Google Form (interim), any agent via docs/agent-playbook.md.
+Live since 2026-07. Source of truth: Supabase. Both old workbooks archived
+read-only. Entry paths: Google Form (interim, expenses), any agent via
+docs/agent-playbook.md (expenses, income, invoices, conversions).
 ```
 
 ```powershell
