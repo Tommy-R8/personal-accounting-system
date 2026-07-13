@@ -79,3 +79,104 @@ def test_daily_cron_job_registered():
         cur.execute("select schedule from cron.job where jobname = 'daily-blue-rate'")
         row = cur.fetchone()
     assert row is not None and row[0] == "30 13 * * *"
+
+
+# --- Task 4: add_transaction RPC ----------------------------------------------
+
+def add(**kw):
+    """Call add_transaction with test defaults; individual kwargs override."""
+    payload = {
+        "p_occurred_on": "2026-07-06",
+        "p_type": "outflow",
+        "p_description": "smoke test row",
+        "p_category": "Comida",
+        "p_amount": 100,
+        "p_source": "test",
+    }
+    payload.update(kw)
+    return rpc("add_transaction", payload)
+
+
+def test_add_ars_outflow_defaults():
+    r = add(p_description="test asado", p_category="Salidas", p_amount=80000)
+    assert r.status_code == 200, r.text
+    row = r.json()
+    assert row["currency"] == "ARS"
+    assert row["fiscal"] is True  # Blanco default
+    assert float(row["usd_rate"]) > 0
+    assert abs(float(row["amount_usd"]) - 80000 / float(row["usd_rate"])) < 0.01
+
+
+def test_usd_rate_is_one():
+    r = add(p_type="inflow", p_category="Sueldo", p_amount=1000, p_currency="USD")
+    assert r.status_code == 200, r.text
+    row = r.json()
+    assert float(row["usd_rate"]) == 1.0
+    assert float(row["amount_usd"]) == 1000.0
+
+
+def test_rate_snapshot_uses_latest_available_day():
+    latest = rest_get(
+        "fx_rates",
+        {"select": "blue_sell", "rate_date": "lte.2026-07-06",
+         "order": "rate_date.desc", "limit": "1"},
+    )[0]
+    r = add()
+    assert r.status_code == 200, r.text
+    assert float(r.json()["usd_rate"]) == float(latest["blue_sell"])
+
+
+def test_names_resolve_case_insensitively():
+    r = add(p_category="salidas", p_payment_method="Wallet C")
+    assert r.status_code == 200, r.text
+    assert r.json()["category_id"] is not None
+
+
+def test_unknown_category_lists_valid_ones():
+    r = add(p_category="Comidaa")
+    assert r.status_code == 400
+    msg = r.json()["message"]
+    assert "valid outflow categories" in msg and "Comida" in msg
+
+
+def test_category_kind_mismatch_is_friendly():
+    r = add(p_category="Sueldo")  # inflow category on an outflow
+    assert r.status_code == 400
+    assert "valid outflow categories" in r.json()["message"]
+
+
+def test_unknown_payment_method_lists_valid_ones():
+    r = add(p_payment_method="Visa Bank B")
+    assert r.status_code == 400
+    assert "valid payment methods" in r.json()["message"]
+
+
+def test_reimbursement_links_to_outflow():
+    dinner = add(p_category="Salidas", p_amount=80000).json()
+    r = add(p_type="inflow", p_category="Reintegros", p_amount=20000,
+            p_parent_id=dinner["id"])
+    assert r.status_code == 200, r.text
+    assert r.json()["parent_id"] == dinner["id"]
+
+
+def test_outflow_cannot_have_parent():
+    dinner = add(p_category="Salidas").json()
+    r = add(p_parent_id=dinner["id"])
+    assert r.status_code == 400
+    assert "reimbursements" in r.json()["message"]
+
+
+def test_reimbursement_cannot_point_at_inflow():
+    salary = add(p_type="inflow", p_category="Sueldo").json()
+    r = add(p_type="inflow", p_category="Reintegros", p_parent_id=salary["id"])
+    assert r.status_code == 400
+    assert "outflow" in r.json()["message"]
+
+
+def test_external_ref_blocks_duplicates():
+    ref = "test:2026-07-06:100:smoke"
+    r1 = add(p_external_ref=ref)
+    assert r1.status_code == 200, r1.text
+    r2 = add(p_external_ref=ref)
+    assert r2.status_code == 400
+    assert "already imported" in r2.json()["message"]
