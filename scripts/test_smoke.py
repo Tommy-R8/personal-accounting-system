@@ -325,3 +325,68 @@ def test_suggest_invoices_small_target_single_invoice():
     r = rpc("suggest_invoices", {"p_target_ars": 120000})
     assert r.status_code == 200, r.text
     assert [float(a) for a in r.json()] == [120000.0]
+
+
+# --- Task 7: fiscal views -------------------------------------------------------
+
+def _deposit_status():
+    return {k: float(v) for k, v in rest_get("v_deposit_status")[0].items()}
+
+
+def test_deposit_status_metrics_move_correctly():
+    """Insert a known fixture and assert the five §5.9 metric deltas."""
+    before = _deposit_status()
+    add_invoice(n=902, p_amount_ars=300000)
+    add_conversion(p_kind="crypto_sale", p_ars_amount=100000, p_usd_amount=70)
+    add_conversion(p_kind="cash_sale", p_ars_amount=50000, p_usd_amount=35,
+                   p_platform="Cash")
+    add_conversion(p_kind="bank_deposit", p_ars_amount=20000, p_usd_amount=None,
+                   p_platform="BBVA")
+    after = _deposit_status()
+    assert after["total_facturado"] - before["total_facturado"] == 300000
+    assert after["total_depositado"] - before["total_depositado"] == 120000  # crypto+deposit
+    assert after["total_cobrado"] - before["total_cobrado"] == 150000        # crypto+cash
+    assert after["restante_por_depositar"] - before["restante_por_depositar"] == 180000
+    assert after["disponible_para_depositar"] - before["disponible_para_depositar"] == 30000
+
+
+def test_monotributo_status_shape_and_math():
+    rows = rest_get("v_monotributo_status")
+    assert len(rows) == 11  # one per category of the current scale
+    d = next(r for r in rows if r["category"] == "D")
+    assert float(d["max_monthly_avg"]) == round(float(d["annual_cap"]) / 12, 2)
+    assert isinstance(d["cap_exceeded"], bool)
+
+
+def test_fiscal_balance_view_shape():
+    rows = rest_get("v_fiscal_balance", {"order": "month.desc", "limit": "1"})
+    assert set(rows[0].keys()) >= {"month", "invoiced_ars", "blanco_spend_ars",
+                                   "invoiced_cum", "blanco_cum"}
+
+
+def test_fiscal_balance_converts_usd_outflows_at_blue_sell():
+    """A 100 USD Blanco outflow must add ~100*blue_sell ARS, not 100 ARS."""
+    def blanco():
+        rows = rest_get("v_fiscal_balance", {"month": "eq.2026-07-01"})
+        return float(rows[0]["blanco_spend_ars"]) if rows else 0.0
+    before = blanco()
+    add(p_amount=100, p_currency="USD", p_occurred_on="2026-07-06")
+    rate = float(rest_get("fx_rates", {"select": "blue_sell",
+                                       "rate_date": "lte.2026-07-06",
+                                       "order": "rate_date.desc",
+                                       "limit": "1"})[0]["blue_sell"])
+    assert abs(blanco() - before - 100 * rate) < 0.05
+
+
+def test_monotributo_view_uses_latest_applicable_scale():
+    d = next(r for r in rest_get("v_monotributo_status") if r["category"] == "D")
+    assert float(d["annual_cap"]) == 26212853.42  # 2026 scale, not 2025's 22934610.05
+
+
+def test_monotributo_view_ignores_future_scales():
+    with db_conn() as conn, conn.cursor() as cur:
+        cur.execute("insert into monotributo_brackets values ('D', '2099-01-01', 1)")
+        cur.execute("select annual_cap from v_monotributo_status where category = 'D'")
+        cap = float(cur.fetchone()[0])
+        conn.rollback()  # discard the future-dated row — no cleanup needed
+    assert cap == 26212853.42  # a scale that hasn't taken effect must be ignored
