@@ -34,7 +34,7 @@ sheets could not answer: invoiced income vs fiscally-registered spending.
 - **Invoice tracking** (facturas emitidas) with automated **monotributo bracket
   checks** against all ARCA categories.
 - **Conversion & deposit tracking**: USDC→ARS sales on exchanges, USD/USDC→ARS cash
-  sales via informal dealer, ARS cash deposits into banks — with the four dashboard
+  sales via informal dealer, ARS cash deposits into banks — with the five dashboard
   metrics (Total Facturado / Depositado / Cobrado, Restante & Disponible, §5.9).
 - **Salary in USDC recorded as income** (inflow transactions, 1 USDC = 1 USD).
 - **Invoiced vs spent en Blanco** comparison (the unification payoff).
@@ -57,7 +57,7 @@ sheets could not answer: invoiced income vs fiscally-registered spending.
   testing. This spec leaves the hooks ready: `invoices.status`, `cae`,
   `cae_expires_on` (§5.6).
 - Tracking USDC/USD holdings or account balances. The system tracks *flows*
-  (the sheets never tracked balances either); the four §5.9 metrics are all
+  (the sheets never tracked balances either); the five §5.9 metrics are all
   derivable from flows.
 
 ## 4. Architecture
@@ -66,7 +66,8 @@ sheets could not answer: invoiced income vs fiscally-registered spending.
 host) and a hosted API service (an extra service to maintain for a single user).
 
 - **Supabase free tier**: 500 MB Postgres, unlimited API requests. Decades of headroom.
-- **Writes** go through a validating RPC (`add_transaction`).
+- **Writes** go through validating RPCs (`add_transaction`, `add_invoice`,
+  `add_conversion`).
 - **Reads** go through SQL views queried with PostgREST filters, or a read-only SQL RPC
   for ad-hoc analysis.
 - **Scheduled jobs** (`pg_cron` + `pg_net` extensions) fetch the daily Blue rate.
@@ -242,7 +243,7 @@ latest `valid_from ≤ today`.
 
 ### 5.9 Fiscal metrics (formulas verified against the Overview sheet)
 
-All four reproduce Tommy's dashboard exactly (checked to the peso against the real
+All five reproduce Tommy's dashboard exactly (checked to the peso against the real
 workbook):
 
 | metric | formula |
@@ -295,11 +296,14 @@ Duplicate `external_ref` → conflict error (safe re-import).
 - `add_conversion(p_occurred_on, p_kind, p_ars_amount, p_usd_amount, p_platform, ...)`
   — resolves the platform name against `payment_methods` (same case-insensitive,
   self-correcting errors as `add_transaction`); enforces the kind/usd_amount rule.
-- `suggest_invoices(p_target_ars, p_min, p_max)` — returns a list of invoice amounts
-  (rounded to the nearest 1,000, each within [min, max]) summing to ≈ the target.
-  Deterministic code, not agent guesswork — replaces the sheet's
-  `ROUND(RANDBETWEEN(75000;200000);-3)`. Suggestion only: it writes nothing;
-  recording still goes through `add_invoice` after Tommy approves.
+- `suggest_invoices(p_target_ars, p_min, p_max)` — returns a list of invoice amounts,
+  each a multiple of 1,000, summing to the target rounded to the nearest 1,000.
+  When the target exceeds `p_max`, every amount is within [min, max]; a target of
+  `p_max` or less returns a single invoice of the rounded target (which may be below
+  `p_min` for small targets — you can't invoice more granularly than the target).
+  Plain code with random jitter (replacing the sheet's
+  `ROUND(RANDBETWEEN(75000;200000);-3)`), not agent guesswork. Suggestion only: it
+  writes nothing; recording still goes through `add_invoice` after Tommy approves.
 
 ### 6.3 Reads
 
@@ -314,8 +318,10 @@ Duplicate `external_ref` → conflict error (safe re-import).
   (max allowed vs actual), and whether the cap is exceeded — the red/yellow/green
   logic of the Overview sheet as data.
 - `v_fiscal_balance` — per month, in ARS: invoiced total vs fiscal-flagged (Blanco)
-  outflow total (USD outflows converted at their snapshotted rate), plus cumulative
-  running totals — the "invoiced vs spent en blanco" comparison.
+  outflow total, plus cumulative running totals — the "invoiced vs spent en blanco"
+  comparison. USD outflows convert to ARS at the Blue **sell** rate for their date
+  from `fx_rates` (nearest earlier day, per §5.5) — note this is a view-time lookup,
+  not the row's `usd_rate`, which is 1.0 for USD rows by construction.
 - Ad-hoc: PostgREST filters on the views
   (`GET /rest/v1/v_transactions?occurred_on=gte.2026-06-01&category=eq.Salidas`), or a
   read-only SQL RPC (`run_report(p_sql)` — executes SELECT-only, read-only transaction)
@@ -338,8 +344,9 @@ anywhere else.
 - Missing days are tolerated by nearest-earlier-day fallback.
 - One-off backfill during setup from
   `https://api.bluelytics.com.ar/v2/evolution.json` (full history) — so backdated
-  entries and statement imports always find a rate. Not used for migrated rows, which
-  keep the sheet's own conversion (§10).
+  entries and statement imports always find a rate. Migrated rows keep the sheet's
+  own conversion (§10.1), with one exception: the 19 rows whose sheet conversion is
+  broken are repaired from these backfilled rates.
 
 ## 8. Google Form bridge (interim entry)
 
@@ -451,9 +458,10 @@ Restante 11,368,458 / Disponible 1,044,320).
 - **Fiscal smoke tests:** same pattern for the fiscal module — duplicate invoice
   numbers rejected; the kind/usd_amount constraint on conversions; the §5.9 metric
   formulas verified against a small fixture whose expected values are computed by
-  hand; `suggest_invoices` output properties (every amount in [min, max], multiple of
-  1,000, sum within one invoice of the target); bracket view picks the latest
-  applicable scale.
+  hand; `suggest_invoices` output properties (every amount a multiple of 1,000 and —
+  for targets above p_max — within [min, max]; sum within 500 of the target, i.e.
+  the target rounded to the nearest 1,000); bracket view picks the latest
+  applicable scale (and ignores future-dated scales).
 - **Migration reconciliation:** the §10.1 and §10.2 success criteria, printed as
   comparison tables.
 - **Form bridge:** one live test submission end-to-end.

@@ -224,12 +224,20 @@ import pytest
 from lib import db_conn, rest_delete, rest_get, rpc
 
 
+def try_delete(path, params):
+    """Teardown helper: tolerate 404s while tables don't exist yet (red phases)."""
+    try:
+        rest_delete(path, params)
+    except Exception:
+        pass
+
+
 @pytest.fixture(autouse=True, scope="session")
 def cleanup():
     yield
     # children first: reimbursements reference their parent via FK
-    rest_delete("transactions", {"source": "eq.test", "parent_id": "not.is.null"})
-    rest_delete("transactions", {"source": "eq.test"})
+    try_delete("transactions", {"source": "eq.test", "parent_id": "not.is.null"})
+    try_delete("transactions", {"source": "eq.test"})
 
 
 # --- Task 2: schema + seeds -------------------------------------------------
@@ -267,7 +275,9 @@ def test_trigger_blocks_kind_mismatch_on_direct_insert():
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `python -m pytest scripts/test_smoke.py -v`
-Expected: all 3 FAIL (404 from `rest_get` — tables don't exist yet).
+Expected: all 3 FAIL — the two seed tests with 404 from `rest_get`, the trigger
+test with `psycopg.errors.UndefinedTable` (it queries via SQL, not REST). Tables
+don't exist yet.
 
 - [ ] **Step 3: Create `supabase/migrations/001_schema.sql`**
 
@@ -640,8 +650,9 @@ def test_external_ref_blocks_duplicates():
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `python -m pytest scripts/test_smoke.py -v -k "add or rate_snapshot or unknown or mismatch or reimbursement or parent or external"`
-Expected: all new tests FAIL with 404 (`add_transaction` not found).
+Run: `python -m pytest scripts/test_smoke.py -v`
+Expected: the 11 new Task-4 tests FAIL with 404 (`add_transaction` not found); the
+6 earlier tests still PASS.
 
 - [ ] **Step 3: Create `supabase/migrations/003_add_transaction.sql`**
 
@@ -906,10 +917,10 @@ Replace the existing `cleanup` fixture body with:
 def cleanup():
     yield
     # children first: reimbursements reference their parent via FK
-    rest_delete("transactions", {"source": "eq.test", "parent_id": "not.is.null"})
-    rest_delete("transactions", {"source": "eq.test"})
-    rest_delete("invoices", {"source": "eq.test"})
-    rest_delete("conversions", {"source": "eq.test"})
+    try_delete("transactions", {"source": "eq.test", "parent_id": "not.is.null"})
+    try_delete("transactions", {"source": "eq.test"})
+    try_delete("invoices", {"source": "eq.test"})
+    try_delete("conversions", {"source": "eq.test"})
 ```
 
 - [ ] **Step 2: Append failing tests to `scripts/test_smoke.py`**
@@ -994,9 +1005,8 @@ def test_suggest_invoices_properties():
     assert r.status_code == 200, r.text
     amounts = [float(a) for a in r.json()]
     assert all(a % 1000 == 0 for a in amounts)
-    assert all(a <= 200000 for a in amounts)
-    assert all(a >= 75000 for a in amounts[:-1])  # last one may be the remainder
-    assert abs(sum(amounts) - 1044320) < 1000
+    assert all(75000 <= a <= 200000 for a in amounts)  # spec §13: EVERY amount
+    assert abs(sum(amounts) - 1044320) <= 500  # = target rounded to nearest 1000
 
 
 def test_suggest_invoices_small_target_single_invoice():
@@ -1007,8 +1017,9 @@ def test_suggest_invoices_small_target_single_invoice():
 
 - [ ] **Step 3: Run tests to verify they fail**
 
-Run: `python -m pytest scripts/test_smoke.py -v -k "invoice or conversion or bracket or suggest or deposit"`
-Expected: all new tests FAIL with 404 (tables/RPCs don't exist).
+Run: `python -m pytest scripts/test_smoke.py -v`
+Expected: the 9 new Task-6 tests FAIL with 404 (tables/RPCs don't exist); all
+earlier tests still PASS.
 
 - [ ] **Step 4: Create `supabase/migrations/005_fiscal_schema.sql`**
 
@@ -1139,6 +1150,10 @@ end $$;
 
 -- Replaces the sheet's ROUND(RANDBETWEEN(75000;200000);-3) workflow: a set of
 -- invoice amounts covering a deposit target. Suggestion only — writes nothing.
+-- Contract (spec §6.2/§13): sum = target rounded to nearest 1,000; every amount a
+-- multiple of 1,000; for targets > p_max every amount is within [p_min, p_max]
+-- (guaranteed by picking each amount from the range that keeps the remainder
+-- coverable by the invoices still to come); target <= p_max returns one invoice.
 create or replace function suggest_invoices(
   p_target_ars numeric,
   p_min numeric default 75000,
@@ -1146,28 +1161,39 @@ create or replace function suggest_invoices(
 ) returns numeric[]
 language plpgsql volatile as $$
 declare
-  v_remaining numeric := p_target_ars;
+  v_target numeric := round(p_target_ars / 1000) * 1000;
+  v_n int;
+  v_remaining numeric;
   v_amounts numeric[] := '{}';
+  v_lo numeric;
+  v_hi numeric;
   v_pick numeric;
 begin
   if p_target_ars <= 0 then
     raise exception 'target must be positive';
   end if;
-  if p_min <= 0 or p_max < p_min then
-    raise exception 'need 0 < p_min <= p_max';
+  if p_min <= 0 or p_max < p_min
+     or p_min % 1000 <> 0 or p_max % 1000 <> 0 then
+    raise exception 'need 0 < p_min <= p_max, both multiples of 1000';
   end if;
-  while v_remaining > p_max loop
-    v_pick := round((p_min + random() * (p_max - p_min)) / 1000) * 1000;
-    if v_remaining - v_pick between 1 and p_min - 1 then
-      v_pick := floor((v_remaining - p_min) / 1000) * 1000;  -- keep remainder >= min
-    end if;
-    v_pick := greatest(v_pick, floor(p_min / 1000) * 1000 + 1000);
+  if v_target <= p_max then
+    return array[v_target];  -- may be below p_min: cannot invoice above the target
+  end if;
+  v_n := ceil(v_target / p_max);  -- fewest invoices that can carry the target
+  if v_target / v_n < p_min then
+    raise exception 'target % cannot be split into invoices within [%, %]',
+      p_target_ars, p_min, p_max;
+  end if;
+  v_remaining := v_target;
+  for i in reverse v_n .. 2 loop  -- after this pick, i-1 invoices remain
+    v_lo := greatest(p_min, v_remaining - (i - 1) * p_max);
+    v_hi := least(p_max, v_remaining - (i - 1) * p_min);
+    v_pick := round((v_lo + random() * (v_hi - v_lo)) / 1000) * 1000;
+    v_pick := least(greatest(v_pick, v_lo), v_hi);
     v_amounts := v_amounts || v_pick;
     v_remaining := v_remaining - v_pick;
   end loop;
-  if v_remaining > 0 then
-    v_amounts := v_amounts || round(v_remaining / 1000) * 1000;
-  end if;
+  v_amounts := v_amounts || v_remaining;  -- in [p_min, p_max] by construction
   return v_amounts;
 end $$;
 
@@ -1250,6 +1276,34 @@ def test_fiscal_balance_view_shape():
     rows = rest_get("v_fiscal_balance", {"order": "month.desc", "limit": "1"})
     assert set(rows[0].keys()) >= {"month", "invoiced_ars", "blanco_spend_ars",
                                    "invoiced_cum", "blanco_cum"}
+
+
+def test_fiscal_balance_converts_usd_outflows_at_blue_sell():
+    """A 100 USD Blanco outflow must add ~100*blue_sell ARS, not 100 ARS."""
+    def blanco():
+        rows = rest_get("v_fiscal_balance", {"month": "eq.2026-07-01"})
+        return float(rows[0]["blanco_spend_ars"]) if rows else 0.0
+    before = blanco()
+    add(p_amount=100, p_currency="USD", p_occurred_on="2026-07-06")
+    rate = float(rest_get("fx_rates", {"select": "blue_sell",
+                                       "rate_date": "lte.2026-07-06",
+                                       "order": "rate_date.desc",
+                                       "limit": "1"})[0]["blue_sell"])
+    assert abs(blanco() - before - 100 * rate) < 0.05
+
+
+def test_monotributo_view_uses_latest_applicable_scale():
+    d = next(r for r in rest_get("v_monotributo_status") if r["category"] == "D")
+    assert float(d["annual_cap"]) == 26212853.42  # 2026 scale, not 2025's 22934610.05
+
+
+def test_monotributo_view_ignores_future_scales():
+    with db_conn() as conn, conn.cursor() as cur:
+        cur.execute("insert into monotributo_brackets values ('D', '2099-01-01', 1)")
+        cur.execute("select annual_cap from v_monotributo_status where category = 'D'")
+        cap = float(cur.fetchone()[0])
+        conn.rollback()  # discard the future-dated row — no cleanup needed
+    assert cap == 26212853.42  # a scale that hasn't taken effect must be ignored
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -1306,17 +1360,22 @@ order by cs.annual_cap;
 
 -- Invoiced vs spent en Blanco, per month + cumulative, in ARS. Outflows are
 -- GROSS (no reimbursement netting): this view tracks registered money movement,
--- not personal cost. USD outflows convert at their snapshotted rate.
+-- not personal cost. USD outflows convert to ARS at the Blue sell rate for their
+-- date from fx_rates (spec §6.3) — NOT the row's usd_rate, which is 1.0 for USD
+-- rows by construction and cannot convert USD to ARS.
 create view v_fiscal_balance as
 with inv as (
   select date_trunc('month', issued_on)::date as m, sum(amount_ars) as invoiced
     from invoices where status = 'issued' group by 1
 ), sp as (
-  select date_trunc('month', occurred_on)::date as m,
-         sum(case when currency = 'ARS' then amount
-                  else amount * usd_rate end) as blanco
-    from transactions
-   where type = 'outflow' and fiscal
+  select date_trunc('month', t.occurred_on)::date as m,
+         sum(case when t.currency = 'ARS' then t.amount
+                  else t.amount * (select f.blue_sell from fx_rates f
+                                    where f.rate_date <= t.occurred_on
+                                    order by f.rate_date desc limit 1)
+             end) as blanco
+    from transactions t
+   where t.type = 'outflow' and t.fiscal
    group by 1
 )
 select coalesce(inv.m, sp.m)                       as month,
@@ -1408,6 +1467,8 @@ Suscripciones, Impuestos, Hogar, Servicios, Salud, Viajes, Otros gastos
 Rendimientos, Otros ingresos
 **Payment methods:** BBVA Crédito, BBVA Débito, MercadoPago Crédito, Gnosis Pay,
 Exa, Lemon, Ripio, Brubank, Belo Lux, Belo, Peanut, Cash, USD Cash
+(The table also contains `BBVA` and `Buenbit` — those are conversion PLATFORMS
+(§Fiscal module), not expense payment methods; never tag a transaction with them.)
 
 (The lists above are seeds; when in doubt fetch live:
 `GET /rest/v1/categories?active=eq.true&select=name,kind` and
@@ -1570,12 +1631,32 @@ var Q_PAYMENT = 'Payment Method';
 var ARCA_NEGRO = 'Negro'; // the option meaning fiscal = false
 
 function onFormSubmitHandler(e) {
-  var payload = buildPayload(e.namedValues, new Date(e.values[0]));
+  var payload = null;
   try {
+    // NOTE: never parse e.values[0] with new Date() — on an es-AR sheet it is a
+    // dd/MM/yyyy string that V8 misparses. The handler runs within seconds of
+    // submission, so "now" IS the submission time.
+    payload = buildPayload(e.namedValues, new Date());
     postTransaction(payload);
   } catch (err) {
-    logError(payload, err);
+    logError(payload || { raw: JSON.stringify(e && e.namedValues) }, err);
   }
+}
+
+/** Amount parser tolerant of es-AR formats; throws (-> errors tab) on garbage. */
+function parseAmount(raw) {
+  raw = String(raw).replace(/\s/g, '');
+  var lastComma = raw.lastIndexOf(','), lastDot = raw.lastIndexOf('.');
+  if (lastComma > -1 && lastDot > -1) {
+    // both present: the later one is the decimal separator ('1.234,56' -> 1234.56)
+    var thousands = lastComma > lastDot ? '.' : ',';
+    raw = raw.split(thousands).join('').replace(',', '.');
+  } else if (lastComma > -1) {
+    raw = raw.replace(',', '.'); // decimal comma ('1500,50' -> 1500.50)
+  }
+  var n = parseFloat(raw);
+  if (!isFinite(n) || n <= 0) throw new Error('unparseable amount: ' + raw);
+  return n;
 }
 
 function buildPayload(v, submittedAt) {
@@ -1589,7 +1670,7 @@ function buildPayload(v, submittedAt) {
     p_type: 'outflow', // the Form is outflow-only by design (spec §8)
     p_description: first(Q_NAME),
     p_category: first(Q_CATEGORY),
-    p_amount: parseFloat(first(Q_AMOUNT).replace(',', '.')),
+    p_amount: parseAmount(first(Q_AMOUNT)),
     p_currency: first(Q_CURRENCY) || 'ARS',
     p_fiscal: arca === '' ? true : arca !== ARCA_NEGRO, // blank -> Blanco
     p_payment_method: first(Q_PAYMENT) || null,
@@ -1652,10 +1733,12 @@ git commit -m "feat: Apps Script Form-to-Supabase bridge with error tab and keep
 Ask Tommy to (with the executor guiding):
 1. **Edit the Form:** Category question → change from checkboxes to *single choice*
    (dropdown), options = the 12 outflow categories. Add a *Payment Method* dropdown
-   (13 options, exact names from the playbook). Make *ARCA* optional; its options
-   must include `Negro` spelled exactly (blank or anything else = Blanco). If his
-   ARCA options differ (e.g. Sí/No), update `ARCA_NEGRO` in the script to match the
-   option that means *not registered*.
+   (13 options, exact names from the playbook — NOT the two platform-only entries
+   BBVA/Buenbit). Make *ARCA* optional; its options must include `Negro` spelled
+   exactly (blank or anything else = Blanco). If his ARCA options differ (e.g.
+   Sí/No), update `ARCA_NEGRO` in the script to match the option that means *not
+   registered*. On the *Amount* question add response validation → Number, so
+   thousands-separator strings can't be submitted.
 2. **Install the script:** open the *linked responses spreadsheet* → Extensions →
    Apps Script → paste `apps-script/form-sync.gs` → set the two Script Properties →
    add the two triggers listed in the file header.
@@ -1850,14 +1933,28 @@ def insert_rows(rows):
     print(f"inserted {len(rows)} rows with source='migration'")
 
 
+def sheet_side():
+    """Independent raw pass over the worksheet — deliberately NOT reusing the
+    parsing pipeline, so a row load_rows() drops or mangles cannot cancel out
+    of the comparison. Sums only the sheet's own numeric USD values."""
+    ws = openpyxl.load_workbook(XLSX, read_only=True, data_only=True)[SHEET]
+    per_month, n_rows, n_broken = defaultdict(float), 0, 0
+    for r in ws.iter_rows(min_row=2, values_only=True):
+        if r[I_TS] is None:
+            continue
+        n_rows += 1
+        if isinstance(r[I_USD], (int, float)):
+            per_month[r[I_TS].strftime("%Y-%m")] += float(r[I_USD])
+        else:
+            n_broken += 1  # broken conversions: repaired rows, excluded here
+    return per_month, n_rows, n_broken
+
+
 def reconcile(rows):
-    # Repaired rows are excluded: their sheet value is unusable by definition
-    # (spec §10.1), so they can't participate in a sheet-vs-db comparison.
-    clean = [r for r in rows if not r["repaired"]]
-    per_month_sheet = defaultdict(float)
-    for r in clean:
-        per_month_sheet[r["occurred_on"].strftime("%Y-%m")] += r["usd"]
+    per_month_sheet, n_sheet_rows, n_broken = sheet_side()
     with db_conn() as conn, conn.cursor() as cur:
+        cur.execute("select count(*) from transactions where source = 'migration'")
+        n_db = cur.fetchone()[0]
         cur.execute(
             """select to_char(t.occurred_on, 'YYYY-MM'), sum(t.amount_usd)
                  from transactions t
@@ -1866,11 +1963,14 @@ def reconcile(rows):
         )
         per_month_db = {m: float(t) for m, t in cur.fetchall()}
     # db totals include repaired rows; subtract their recomputed USD per month
+    # so both sides cover the same clean-row population (spec §10.1).
     repaired_by_month = defaultdict(float)
     for r in rows:
         if r["repaired"]:
             repaired_by_month[r["occurred_on"].strftime("%Y-%m")] += r["usd"]
-    print(f"\n{'month':8} {'sheet_usd':>12} {'db_usd':>12} {'diff%':>8}")
+    print(f"\nrow counts: sheet={n_sheet_rows} db={n_db} "
+          f"(sheet rows with broken USD: {n_broken})")
+    print(f"{'month':8} {'sheet_usd':>12} {'db_usd':>12} {'diff%':>8}")
     worst = 0.0
     for m in sorted(per_month_sheet):
         s = per_month_sheet[m]
@@ -1878,7 +1978,10 @@ def reconcile(rows):
         diff = abs(s - d) / s * 100 if s else 0.0
         worst = max(worst, diff)
         print(f"{m:8} {s:12.2f} {d:12.2f} {diff:8.3f}")
-    verdict = "PASS" if worst < 0.5 else "FAIL"
+    counts_ok = n_db == n_sheet_rows
+    if not counts_ok:
+        print(f"\nROW COUNT MISMATCH: sheet has {n_sheet_rows}, db has {n_db}")
+    verdict = "PASS" if worst < 0.5 and counts_ok else "FAIL"
     print(f"\nRECONCILIATION {verdict} — worst monthly diff {worst:.3f}% (limit 0.5%)")
 
 
@@ -1915,9 +2018,9 @@ awareness. Rerun the dry run until he approves and problems reach zero.
 - [ ] **Step 6: Execute and reconcile**
 
 Run: `python scripts/migrate_from_sheets.py --execute`
-Expected: `inserted N rows`, then the reconciliation table ending in
-`RECONCILIATION PASS`. If FAIL: investigate the worst month (usually a row the
-sheet's USD formula had errored on), fix, and — since this must stay re-runnable —
+Expected: `inserted N rows`, then matching row counts and the reconciliation table
+ending in `RECONCILIATION PASS`. If FAIL: check the row counts first (a dropped or
+double-read row), then the worst month, fix, and — since this must stay re-runnable —
 delete and redo: `delete from transactions where source = 'migration'` via
 `python -c "import sys; sys.path.insert(0,'scripts'); from lib import db_conn; c=db_conn(); c.execute('delete from transactions where source=%s', ('migration',)); c.commit()"`
 then `--execute` again.
@@ -2063,26 +2166,52 @@ def insert_all(invoices, conversions):
     print(f"inserted {len(invoices)} invoices + {len(conversions)} conversions")
 
 
-def reconcile():
+def check_platforms(conversions):
+    """Resolve platform names at dry-run time (not mid-insert): unknown spellings
+    in a fresh export become reviewable problems instead of a KeyError."""
+    with db_conn() as conn, conn.cursor() as cur:
+        cur.execute("select name from payment_methods where active")
+        known = {n for (n,) in cur.fetchall()}
+    return [(c["line"], f"unknown platform {c['platform']!r} — "
+             f"add it to payment_methods or fix the cell")
+            for c in conversions if c["platform"] not in known]
+
+
+def reconcile(invoices, conversions):
+    """Spec §10.2: sheet-derived metrics must equal v_deposit_status to the peso.
+    Valid because at this point only migrated rows exist in the fiscal tables."""
+    expected = metrics(conversions, invoices)
     with db_conn() as conn, conn.cursor() as cur:
         cur.execute("select * from v_deposit_status")
         cols = [d[0] for d in cur.description]
-        print("\n-- v_deposit_status (must equal the Overview tab to the peso) --")
-        for k, v in zip(cols, cur.fetchone()):
-            print(f"  {k:28} {float(v):>15,.2f}")
+        actual = dict(zip(cols, (float(v) for v in cur.fetchone())))
+    mapping = {  # sheet-side key -> view column
+        "facturado": "total_facturado", "depositado": "total_depositado",
+        "cobrado": "total_cobrado", "restante": "restante_por_depositar",
+        "disponible": "disponible_para_depositar",
+    }
+    print(f"\n{'metric':12} {'sheet':>16} {'db':>16}")
+    ok = True
+    for k, col in mapping.items():
+        s, d = expected[k], actual[col]
+        match = abs(s - d) < 0.01  # to the peso
+        ok = ok and match
+        print(f"{k:12} {s:>16,.2f} {d:>16,.2f}{'' if match else '  <-- MISMATCH'}")
+    print(f"\nRECONCILIATION {'PASS' if ok else 'FAIL'}")
 
 
 def main():
     wb = openpyxl.load_workbook(XLSX, data_only=True)
     invoices = load_invoices(wb)
     conversions, problems = load_conversions(wb)
+    problems += check_platforms(conversions)
     if "--execute" not in sys.argv:
         dry_run(invoices, conversions, problems)
         return
     if problems:
         sys.exit(f"refusing to execute with {len(problems)} problem rows")
     insert_all(invoices, conversions)
-    reconcile()
+    reconcile(invoices, conversions)
 
 
 if __name__ == "__main__":
@@ -2099,11 +2228,11 @@ classification table for a quick eyeball.
 - [ ] **Step 4: Execute and reconcile**
 
 Run: `python scripts/migrate_facturacion.py --execute`
-Expected: insert counts, then `v_deposit_status` matching the Overview values
-Tommy confirmed at Step 1, to the peso. (Note: `v_deposit_status` reads ALL rows;
-at this point only migrated rows exist, so it's a clean comparison. If FAIL:
-delete and redo — `delete from invoices where source='migration'` and same for
-`conversions`.)
+Expected: insert counts, then the sheet-vs-db metric table ending in
+`RECONCILIATION PASS`, and the sheet-side column matching the Overview values
+Tommy confirmed at Step 1. If FAIL: a misclassified kind is the likely cause
+(it shifts ARS between Depositado and Cobrado); fix, then delete and redo —
+`delete from invoices where source='migration'` and same for `conversions`.
 
 - [ ] **Step 5: Also verify the bracket view against the Overview**
 
@@ -2132,9 +2261,11 @@ git commit -m "feat: facturación workbook migration with kind classification an
 At least one calendar day after Task 3, run:
 `python -c "import sys; sys.path.insert(0,'scripts'); from lib import rest_get; print(rest_get('fx_rates', {'order': 'rate_date.desc', 'limit': '2'}))"`
 Expected: a row dated within the last few days that was NOT inserted by the
-backfill/tests (check `cron.job_run_details` via `run_report` if unsure:
-`select * from cron.job_run_details order by start_time desc limit 5` — status
-`succeeded`).
+backfill/tests. If unsure, check the cron log **via the direct DB connection**
+(the `cron` schema is not readable by `service_role`, so `run_report` cannot
+see it):
+`python -c "import sys; sys.path.insert(0,'scripts'); from lib import db_conn; c=db_conn(); cur=c.cursor(); cur.execute('select start_time, status from cron.job_run_details order by start_time desc limit 5'); [print(r) for r in cur.fetchall()]"`
+Expected: recent runs with status `succeeded`.
 
 - [ ] **Step 2: USER CHECKPOINT — archive the old system**
 
