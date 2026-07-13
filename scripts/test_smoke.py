@@ -174,9 +174,16 @@ def test_reimbursement_cannot_point_at_inflow():
 
 
 def test_external_ref_blocks_duplicates():
-    ref = "test:2026-07-06:100:smoke"
+    import uuid
+    ref = f"test:2026-07-06:100:{uuid.uuid4()}"
     r1 = add(p_external_ref=ref)
     assert r1.status_code == 200, r1.text
     r2 = add(p_external_ref=ref)
     assert r2.status_code == 400
     assert "already imported" in r2.json()["message"]
+
+
+def test_invalid_type_is_rejected():
+    r = add(p_type="expense")
+    assert r.status_code == 400
+    assert "inflow or outflow" in r.json()["message"]
