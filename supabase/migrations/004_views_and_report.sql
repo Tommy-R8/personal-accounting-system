@@ -18,6 +18,10 @@ left join lateral (
    where r.parent_id = t.id
 ) r on true;
 
+-- The lateral reimbursement sum probes children by parent_id per parent row.
+create index transactions_parent_id_idx
+  on transactions (parent_id) where parent_id is not null;
+
 -- Reimbursement rows (parent_id set) are excluded; their value is already
 -- subtracted from the parent's net_amount_usd, in the parent's month (spec §5.5).
 create view v_monthly_summary as
