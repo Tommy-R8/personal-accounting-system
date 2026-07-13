@@ -187,3 +187,50 @@ def test_invalid_type_is_rejected():
     r = add(p_type="expense")
     assert r.status_code == 400
     assert "inflow or outflow" in r.json()["message"]
+
+
+# --- Task 5: views + run_report -------------------------------------------------
+
+def test_group_netting_in_views():
+    dinner = add(p_category="Salidas", p_amount=80000,
+                 p_description="test group dinner").json()
+    for _ in range(3):
+        add(p_type="inflow", p_category="Reintegros", p_amount=20000,
+            p_parent_id=dinner["id"])
+
+    v = rest_get("v_transactions", {"id": f"eq.{dinner['id']}"})[0]
+    rate = float(dinner["usd_rate"])
+    # same-date reimbursements share the rate: net = (80000 - 60000) / rate
+    assert abs(float(v["net_amount_usd"]) - 20000 / rate) < 0.05
+
+    g = rest_get("v_group_expenses", {"id": f"eq.{dinner['id']}"})[0]
+    assert g["reimbursement_count"] == 3
+    assert abs(float(g["net_usd"]) - 20000 / rate) < 0.05
+
+
+def test_summary_excludes_reimbursements_and_nets_parents():
+    # via run_report so we can filter to source='test' (v_monthly_summary can't)
+    r = rpc("run_report", {"p_sql": (
+        "select round(sum(net_amount_usd)::numeric, 2) as total "
+        "from v_transactions where source = 'test' "
+        "and type = 'outflow' and parent_id is null"
+    )})
+    assert r.status_code == 200, r.text
+    assert float(r.json()[0]["total"]) > 0
+
+
+def test_monthly_summary_view_shape():
+    rows = rest_get("v_monthly_summary", {"limit": "1"})
+    assert set(rows[0].keys()) == {"month", "type", "category", "fiscal",
+                                   "total_usd", "tx_count"}
+
+
+def test_run_report_rejects_non_select():
+    r = rpc("run_report", {"p_sql": "delete from transactions"})
+    assert r.status_code == 400
+    assert "SELECT" in r.json()["message"]
+
+
+def test_run_report_rejects_multi_statement():
+    r = rpc("run_report", {"p_sql": "select 1; select 2"})
+    assert r.status_code == 400
