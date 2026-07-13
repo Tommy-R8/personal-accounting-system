@@ -2,7 +2,10 @@
 create extension if not exists pg_cron;
 create extension if not exists http with schema extensions;
 
--- Future functions must be granted explicitly (default EXECUTE to PUBLIC revoked)
+-- NOTE: default-privileges revoke alone does NOT strip the built-in PUBLIC
+-- execute grant on later functions (verified live) — every migration that
+-- creates a function must also explicitly:
+--   revoke execute on function <fn>(<args>) from public, anon, authenticated;
 alter default privileges in schema public
   revoke execute on functions from public, anon, authenticated;
 
@@ -75,9 +78,14 @@ begin
   return new;
 end $$;
 
+-- Residual risk: the trigger validates the NEW row only — an UPDATE flipping a
+-- parent outflow's type to inflow after children exist is not caught
+-- (unreachable via the planned RPCs, only via direct service_role SQL).
 create trigger validate_transaction
   before insert or update on transactions
   for each row execute function trg_validate_transaction();
+
+revoke execute on function trg_validate_transaction() from public, anon, authenticated;
 
 -- RLS: no policies. anon/authenticated are blocked; service_role bypasses RLS.
 alter table categories enable row level security;
