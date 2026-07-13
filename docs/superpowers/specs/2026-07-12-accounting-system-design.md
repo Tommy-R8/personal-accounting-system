@@ -231,12 +231,17 @@ One-off Python script run locally (Claude Code):
 
 1. Export the existing Sheet to CSV.
 2. Backfill `fx_rates` from Bluelytics evolution.
-3. Map old → new categories (mapping table in the script; multi-checkbox rows take the
-   first/primary category, rest become tags).
+3. Map old → new categories (mapping table in the script). Multi-checkbox rows resolve
+   to a single category: **combo rules** first (e.g. `Comida + Salidas → Salidas`),
+   falling back to the first checked category; the non-winning categories become tags.
 4. Fiscal from the ARCA column; `payment_method` null for history; `source='migration'`.
 5. Take USD values directly from the sheet's existing per-row conversion (no
    recomputation): for ARS rows derive `usd_rate = amount / sheet_usd_amount`, USD rows
    get `usd_rate = 1.0`. Migrated rows therefore reproduce the sheet exactly.
+6. **Dry-run report before any insert:** the script prints every multi-checkbox row
+   with its proposed category + tags, plus any unmapped categories and an import
+   summary (row counts, per-month totals). Combo rules are adjusted and the dry run
+   re-run until the output looks right; only then does the real import execute.
 
 **Success criterion:** per-month USD totals in Supabase reconcile with the Sheet's
 totals within rounding tolerance (< 0.5%). Only then is the Sheet demoted to read-only
