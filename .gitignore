@@ -1,0 +1,6 @@
+# Personal financial data — never commit
+data/
+
+# Secrets
+.env
+.env.*
