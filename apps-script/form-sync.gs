@@ -36,7 +36,10 @@ function onFormSubmitHandler(e) {
   }
 }
 
-/** Amount parser tolerant of es-AR formats; throws (-> errors tab) on garbage. */
+/** Amount parser tolerant of es-AR formats; throws (-> errors tab) on garbage.
+ *  PRECONDITION: the Form is es-AR locale with Number validation — a lone comma
+ *  is a DECIMAL separator ('1,5' = 1.5) and dot-groups of 3 are thousands
+ *  ('15.000' = 15000). If the Form locale ever changes, revisit this parser. */
 function parseAmount(raw) {
   raw = String(raw).replace(/\s/g, '');
   var lastComma = raw.lastIndexOf(','), lastDot = raw.lastIndexOf('.');
@@ -94,14 +97,16 @@ function logError(payload, err) {
 
 /** Daily: retry failed posts, and ping Supabase so the free tier never pauses. */
 function retryErrors() {
-  keepAlive();
+  try { keepAlive(); } catch (e) { /* ping failure must not abort retries */ }
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var tab = ss.getSheetByName('errors');
   if (!tab || tab.getLastRow() === 0) return;
   var rows = tab.getDataRange().getValues();
   for (var i = rows.length - 1; i >= 0; i--) {
     try {
-      postTransaction(JSON.parse(rows[i][1]));
+      var parsed = JSON.parse(rows[i][1]);
+      if (!parsed || parsed.p_amount == null) continue; // unfixable {raw:...} row: leave for manual review
+      postTransaction(parsed);
       tab.deleteRow(i + 1);
     } catch (err) {
       // stays in the tab for the next daily retry
@@ -111,6 +116,7 @@ function retryErrors() {
 
 function keepAlive() {
   UrlFetchApp.fetch(SUPABASE_URL + '/rest/v1/categories?select=id&limit=1', {
-    headers: { apikey: SERVICE_KEY, Authorization: 'Bearer ' + SERVICE_KEY }
+    headers: { apikey: SERVICE_KEY, Authorization: 'Bearer ' + SERVICE_KEY },
+    muteHttpExceptions: true
   });
 }
