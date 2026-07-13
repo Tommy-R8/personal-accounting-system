@@ -1653,6 +1653,8 @@ function parseAmount(raw) {
     raw = raw.split(thousands).join('').replace(',', '.');
   } else if (lastComma > -1) {
     raw = raw.replace(',', '.'); // decimal comma ('1500,50' -> 1500.50)
+  } else if (/^\d{1,3}(\.\d{3})+$/.test(raw)) {
+    raw = raw.split('.').join(''); // es-AR thousands dots ('15.000' -> 15000)
   }
   var n = parseFloat(raw);
   if (!isFinite(n) || n <= 0) throw new Error('unparseable amount: ' + raw);
