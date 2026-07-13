@@ -193,8 +193,10 @@ tomorrow. Nothing agent-specific lives anywhere else.
 - `pg_cron` schedule (daily, after Argentine market open) → `pg_net` GET
   `https://api.bluelytics.com.ar/v2/latest` → upsert into `fx_rates`.
 - Missing days are tolerated by nearest-earlier-day fallback.
-- One-off backfill during migration from
-  `https://api.bluelytics.com.ar/v2/evolution.json` (full history).
+- One-off backfill during setup from
+  `https://api.bluelytics.com.ar/v2/evolution.json` (full history) — so backdated
+  entries and statement imports always find a rate. Not used for migrated rows, which
+  keep the sheet's own conversion (§10).
 
 ## 8. Google Form bridge (interim entry)
 
@@ -203,9 +205,11 @@ tomorrow. Nothing agent-specific lives anywhere else.
   Properties, never in the sheet or repo.
 - Failures append to an `errors` tab in the sheet for later retry.
 - A daily time-driven trigger retries the `errors` tab and doubles as keep-alive.
-- Form updates (manual, documented): remove Educación; add a Payment Method dropdown;
-  make the ARCA question optional — blank maps to Blanco (Forms can't preset a default
-  on a required dropdown).
+- Form updates (manual, documented): the current Form only has 7 of the 12 outflow
+  categories — add the five new ones (Hogar, Servicios, Salud, Viajes, Otros gastos);
+  switch the Category question from checkboxes to single-choice to match the
+  one-category model; add a Payment Method dropdown; make the ARCA question optional —
+  blank maps to Blanco (Forms can't preset a default on a required dropdown).
 - The Form remains **outflow-only**. Inflows and reimbursement linking happen through
   an agent (they're rare). The Form is retired once Telegram/Hermes entry works.
 
@@ -230,7 +234,9 @@ One-off Python script run locally (Claude Code):
 3. Map old → new categories (mapping table in the script; multi-checkbox rows take the
    first/primary category, rest become tags).
 4. Fiscal from the ARCA column; `payment_method` null for history; `source='migration'`.
-5. Recompute USD at historical sell rates.
+5. Take USD values directly from the sheet's existing per-row conversion (no
+   recomputation): for ARS rows derive `usd_rate = amount / sheet_usd_amount`, USD rows
+   get `usd_rate = 1.0`. Migrated rows therefore reproduce the sheet exactly.
 
 **Success criterion:** per-month USD totals in Supabase reconcile with the Sheet's
 totals within rounding tolerance (< 0.5%). Only then is the Sheet demoted to read-only
