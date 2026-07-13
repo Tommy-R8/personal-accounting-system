@@ -70,7 +70,7 @@ host) and a hosted API service (an extra service to maintain for a single user).
   `add_conversion`).
 - **Reads** go through SQL views queried with PostgREST filters, or a read-only SQL RPC
   for ad-hoc analysis.
-- **Scheduled jobs** (`pg_cron` + `pg_net` extensions) fetch the daily Blue rate.
+- **Scheduled jobs** (`pg_cron` + the synchronous `http` extension) fetch the daily Blue rate.
 - **Keep-alive**: the daily rate job plus a daily Apps Script trigger provide steady
   activity so the free-tier 7-day inactivity pause never triggers. If a pause ever
   happens anyway, add a GitHub Actions cron ping (documented fallback).
@@ -339,7 +339,7 @@ anywhere else.
 
 ## 7. Blue rate job
 
-- `pg_cron` schedule (daily, after Argentine market open) → `pg_net` GET
+- `pg_cron` schedule (daily, after Argentine market open) → synchronous `http` GET
   `https://api.bluelytics.com.ar/v2/latest` → upsert into `fx_rates`.
 - Missing days are tolerated by nearest-earlier-day fallback.
 - One-off backfill during setup from

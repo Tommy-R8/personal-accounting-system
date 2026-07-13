@@ -54,3 +54,28 @@ def test_trigger_blocks_kind_mismatch_on_direct_insert():
                    values ('2026-07-06', 'outflow', 'x', %s, 1, 'ARS', 1000, 'test')""",
                 (inflow_cat,),
             )
+
+
+# --- Task 3: fx rates ---------------------------------------------------------
+
+def test_backfill_populated_history():
+    oldest = rest_get("fx_rates", {"select": "rate_date", "order": "rate_date.asc", "limit": "1"})
+    assert oldest and oldest[0]["rate_date"] <= "2015-01-01"
+
+
+def test_fetch_blue_rate_upserts_recent_row():
+    from datetime import date
+    with db_conn() as conn, conn.cursor() as cur:
+        cur.execute("select fetch_blue_rate()")
+        cur.execute("select max(rate_date), max(blue_sell) from fx_rates")
+        max_date, sell = cur.fetchone()
+        conn.commit()
+    assert (date.today() - max_date).days <= 4  # Fri rate on a long weekend at worst
+    assert sell > 0
+
+
+def test_daily_cron_job_registered():
+    with db_conn() as conn, conn.cursor() as cur:
+        cur.execute("select schedule from cron.job where jobname = 'daily-blue-rate'")
+        row = cur.fetchone()
+    assert row is not None and row[0] == "30 13 * * *"
