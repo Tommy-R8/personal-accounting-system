@@ -1,5 +1,9 @@
 # Personal financial data — never commit
 data/
+*.xlsx
+*.xls
+*.ods
+*.csv
 
 # Secrets
 .env
