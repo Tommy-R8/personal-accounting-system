@@ -47,7 +47,7 @@ def load_conversions(wb):
         try:
             usd = float(usd) if isinstance(usd, (int, float)) else None
             kind = classify(platform, usd)
-            # rate_quoted only when plausible (the Buenbit row holds the ARS
+            # rate_quoted only when plausible (one exchange row holds the ARS
             # amount in Tipo de Cambio -> import as null)
             quoted = float(tc) if isinstance(tc, (int, float)) and tc < 100000 else None
             rows.append(dict(occurred_on=r[0].date(), kind=kind,

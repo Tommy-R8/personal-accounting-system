@@ -26,7 +26,7 @@ CATEGORY_MAP = {                # old sheet name -> new category name (1:1 today
     "Impuestos": "Impuestos",
 }
 COMBO_RULES = {                 # frozenset of NEW names -> winning category.
-    # Confirmed by Tommy 2026-07-13 during dry-run review (plan Task 10 Step 5).
+    # Confirmed by the owner 2026-07-13 during dry-run review (plan Task 10 Step 5).
     frozenset({"Comida", "Salidas"}): "Salidas",
     frozenset({"Compras", "Regalos"}): "Regalos",
     frozenset({"Compras", "Salidas"}): "Salidas",
@@ -37,7 +37,7 @@ COMBO_RULES = {                 # frozenset of NEW names -> winning category.
     frozenset({"Compras", "Transporte"}): "Transporte",
     frozenset({"Comida", "Compras"}): "Comida",
 }
-LINE_CATEGORY_OVERRIDES = {     # rows with an empty Category cell — Tommy 2026-07-13
+LINE_CATEGORY_OVERRIDES = {     # rows with an empty Category cell — confirmed 2026-07-13
     287: "Transporte",   # Uber
     344: "Comida",       # McDonald's
     404: "Salud",        # Farmacia

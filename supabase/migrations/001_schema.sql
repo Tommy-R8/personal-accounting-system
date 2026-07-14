@@ -103,9 +103,13 @@ insert into categories (name, kind) values
   ('Regalos recibidos', 'inflow'), ('Rendimientos', 'inflow'),
   ('Otros ingresos', 'inflow');
 
--- The last two (BBVA = the bank account, Buenbit) exist as conversion platforms
--- (spec §5.2/§5.7); the table doubles as the platform list.
+-- Payment methods are personal — only the two universal ones are seeded.
+-- Uncomment/adapt the examples below, or insert rows later; agents fetch the
+-- live list. NOTE: this table doubles as the conversion-platform list for the
+-- fiscal module (banks and exchanges used in add_conversion go here too, but
+-- should never be tagged on expenses — see docs/configuration.md).
 insert into payment_methods (name) values
-  ('BBVA Crédito'), ('BBVA Débito'), ('MercadoPago Crédito'), ('Gnosis Pay'),
-  ('Exa'), ('Lemon'), ('Ripio'), ('Brubank'), ('Belo Lux'), ('Belo'),
-  ('Peanut'), ('Cash'), ('USD Cash'), ('BBVA'), ('Buenbit');
+  ('Cash'), ('USD Cash');
+-- , ('MyBank Débito'), ('MyBank Crédito')     -- bank cards
+-- , ('MercadoPago'), ('PayPal')               -- fintech wallets
+-- , ('MyBank'), ('MyExchange')                -- conversion platforms (fiscal module)
