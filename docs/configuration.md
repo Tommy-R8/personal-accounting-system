@@ -2,7 +2,7 @@
 
 What you can tweak, where it lives, and what depends on it. Two kinds of
 knobs: **data** (rows in tables — change live with SQL, no redeploy) and
-**code** (SQL functions / the Apps Script — edit and reapply).
+**code** (SQL functions — edit and reapply).
 
 ## Categories (data)
 
@@ -17,7 +17,6 @@ update categories set active = false where name = 'Regalos';  -- hide, keep hist
 ```
 
 Never delete a category that has transactions — deactivate it instead.
-If you use the Google Form, keep its Category dropdown in sync by hand.
 Agents can always fetch the live list:
 `GET /rest/v1/categories?active=eq.true&select=name,kind`.
 
@@ -33,11 +32,11 @@ methods; agents are told never to tag a transaction with a platform-only entry.
 ## Currencies (code — invasive)
 
 `ARS` and `USD` are hard-wired: a check constraint on `transactions.currency`
-(`001_schema.sql`), rate resolution in `add_transaction` (`003`, where USD is
-the base: `usd_rate = 1.0`, ARS looks up `fx_rates.blue_sell`), and the ARS
-default in the Form bridge. Adding a third currency means: widen the check
-constraint, add a rate source + column/table for it, extend the rate logic in
-`add_transaction`, and update the playbook. Doable, but it touches everything
+(`001_schema.sql`) and rate resolution in `add_transaction` (`003`, where USD
+is the base: `usd_rate = 1.0`, ARS looks up `fx_rates.blue_sell`). Adding a
+third currency means: widen the check constraint, add a rate source +
+column/table for it, extend the rate logic in `add_transaction`, and update
+the playbook. Doable, but it touches everything
 — the design assumes an ARS-earning, USD-thinking user.
 
 ## FX rate source & schedule (code)
@@ -50,11 +49,10 @@ To change source, rate side, or schedule, edit `fetch_blue_rate()` / the
 with your currency's official rate API — everything downstream only reads the
 `fx_rates` table. `scripts/backfill_rates.py` is the one-off history loader.
 
-## Timezone (code, two places)
+## Timezone
 
-`America/Argentina/Buenos_Aires` appears in `apps-script/form-sync.gs`
-(stamping the Form submission date) and as the "default to today" convention
-in `docs/agent-playbook.md`. Change both together.
+`America/Argentina/Buenos_Aires` is the "default to today" convention in
+`docs/agent-playbook.md`.
 
 ## Fiscal module (Argentina-specific; ignore or rip out if N/A)
 
@@ -65,19 +63,9 @@ in `docs/agent-playbook.md`. Change both together.
 - **Punto de venta** (code): invoice numbering defaults to `'0001'`
   (`add_invoice` in `005`).
 
-Not in Argentina? The core ledger (transactions, categories, views, Form
-bridge) works standalone — just never call `add_invoice`/`add_conversion`,
-or drop migrations `005`–`007` before first apply.
-
-## Google Form bridge (code)
-
-Top of `apps-script/form-sync.gs`:
-
-- `Q_NAME` … `Q_PAYMENT` — must equal your Form question titles exactly
-- `ARCA_NEGRO` — the option string that flips `fiscal` to false
-- `parseAmount()` — assumes es-AR locale (comma decimals, dot thousands);
-  adjust if your sheet locale differs
-- The Form is deliberately **outflow-only**; inflows go through an agent
+Not in Argentina? The core ledger (transactions, categories, views) works
+standalone — just never call `add_invoice`/`add_conversion`, or drop
+migrations `005`–`007` before first apply.
 
 ## Agent playbook (the contract)
 
