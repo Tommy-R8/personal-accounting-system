@@ -2,15 +2,15 @@
 
 Everything runs against a Supabase project (Postgres + PostgREST). The Python
 scripts here are only for provisioning and testing — day-to-day use is agents
-(or the Google Form) talking to the Supabase REST API directly.
+talking to the Supabase REST API directly.
 
 ## Prerequisites
 
-- A [Supabase](https://supabase.com) account (the free tier works; the daily
-  keep-alive ping in the Form bridge exists precisely to stop free projects
-  from auto-pausing)
+- A [Supabase](https://supabase.com) account. The free tier works, with one
+  caveat: free projects auto-pause after about a week without API traffic.
+  Regular use keeps it awake; a paused project restores in one click from the
+  dashboard.
 - Python 3.12+
-- Optional: a Google account, if you want the Google Form → Supabase bridge
 
 ## 1. Create the Supabase project
 
@@ -84,35 +84,3 @@ Give any LLM agent the two env vars plus [`docs/agent-playbook.md`](agent-playbo
 — the playbook is the complete interface contract (how to log transactions,
 query views, record invoices/conversions, import statements). Nothing else is
 needed; that's the point of the design.
-
-## 7. Optional: Google Form quick-entry bridge
-
-A Google Form is the lowest-friction way to log an expense from your phone.
-
-1. Create a Form with these questions (titles must match the constants at the
-   top of `apps-script/form-sync.gs`, or edit the constants):
-   - **Name** (short text) — the expense description
-   - **Category** (dropdown) — must match the outflow category names in the DB
-   - **ARCA** (multiple choice, optional) — include an option named `Negro`
-     for off-the-books expenses; anything else (or blank) means fiscal
-   - **Currency** (dropdown, optional) — `ARS` / `USD`; blank defaults to ARS
-   - **Amount** (short text with *Number* validation)
-   - **Payment Method** (dropdown, optional) — must match DB payment methods
-2. Link the Form to a response spreadsheet, then in the spreadsheet:
-   **Extensions → Apps Script** and paste in `apps-script/form-sync.gs`.
-3. Set **Project Settings → Script Properties**: `SUPABASE_URL` and
-   `SUPABASE_SERVICE_KEY`.
-4. Add two triggers (clock icon → Add trigger):
-   - `onFormSubmitHandler` — From spreadsheet — On form submit
-   - `retryErrors` — Time-driven — Day timer (retries failed posts and pings
-     Supabase daily so a free-tier project never pauses)
-
-Note the amount parser assumes an **es-AR spreadsheet locale** (comma =
-decimal separator, dots = thousands). If your Form/sheet locale differs,
-revisit `parseAmount()` in the script.
-
-## What NOT to run
-
-`scripts/migrate_from_sheets.py` and `scripts/migrate_facturacion.py` were
-one-time importers for the original owner's personal spreadsheets (expected
-under `data/`, which is gitignored). A fresh install starts empty — skip them.

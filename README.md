@@ -1,7 +1,7 @@
 # Personal Accounting System
 
 Agent-agnostic accounting on Supabase: the entire "app" is a Postgres schema
-plus its REST API — any LLM agent (or a Google Form) is the frontend.
+plus its REST API — any LLM agent is the frontend.
 
 - **First-time setup:** `docs/setup.md`
 - **What you can change** (categories, currencies, FX source, fiscal module...):
@@ -12,9 +12,10 @@ Comments referencing "spec §…" point to the original design document, which i
 kept out of the repo because it contains the owner's personal financial details.
 
 ## Layout
-- `supabase/migrations/` — numbered SQL, applied by `scripts/apply_migrations.py`
-- `scripts/` — migrations applier, rate backfill, one-time sheet migration, smoke tests
-- `apps-script/` — Google Form bridge (pasted into Apps Script editor)
+- `supabase/migrations/` — numbered SQL schema files, applied in order by
+  `scripts/apply_migrations.py` (tracked in a `_migrations` table, so
+  re-running only applies what's new)
+- `scripts/` — migrations applier, rate backfill, smoke tests
 
 ## Quick start
 ```powershell
