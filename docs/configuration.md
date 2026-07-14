@@ -23,12 +23,12 @@ Agents can always fetch the live list:
 
 ## Payment methods & conversion platforms (data)
 
-Rows in `payment_methods`, same pattern (`active` flag, live SQL). One quirk:
-the table doubles as the **conversion platform** list for the fiscal module —
-entries like `Bank A` (the bank) and `Exchange A` are platforms for
-`add_conversion`, not expense payment methods. Add your own banks / cards /
-wallets freely; if you add a platform, mention the distinction in
-`docs/agent-playbook.md` so agents don't tag expenses with it.
+Rows in `payment_methods`, same pattern (`active` flag, live SQL). Only `Cash`
+and `USD Cash` are seeded — add your own banks / cards / wallets (commented
+examples in `001_schema.sql`). One quirk: the table doubles as the
+**conversion platform** list for the fiscal module — the banks and exchanges
+you use in `add_conversion` also live here, but are not expense payment
+methods; agents are told never to tag a transaction with a platform-only entry.
 
 ## Currencies (code — invasive)
 
@@ -64,8 +64,6 @@ in `docs/agent-playbook.md`. Change both together.
   `v_monotributo_status` picks the right scale by date.
 - **Punto de venta** (code): invoice numbering defaults to `'0001'`
   (`add_invoice` in `005`).
-- **Invoice suggestion bounds** (per-call): `suggest_invoices` defaults to
-  75,000–200,000 ARS per invoice; override with `p_min`/`p_max` in the call.
 
 Not in Argentina? The core ledger (transactions, categories, views, Form
 bridge) works standalone — just never call `add_invoice`/`add_conversion`,

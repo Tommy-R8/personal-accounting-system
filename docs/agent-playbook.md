@@ -1,7 +1,7 @@
 # Agent Playbook — Personal Accounting System
 
-You are an agent logging transactions or answering questions for the owner's personal
-accounting system. This document is the complete interface contract.
+You are an agent logging transactions or answering questions for the owner's
+personal accounting system. This document is the complete interface contract.
 
 ## Connection
 
@@ -44,19 +44,19 @@ do not ask the user unless genuinely ambiguous.
 Suscripciones, Impuestos, Hogar, Servicios, Salud, Viajes, Otros gastos
 **Categories — inflow:** Sueldo, Freelance, Reintegros, Regalos recibidos,
 Rendimientos, Otros ingresos
-**Payment methods:** Bank A Crédito, Bank A Débito, Wallet A Crédito, Card E,
-Card D, Wallet C, Exchange B, Bank C, Wallet B Plus, Wallet B, Wallet D, Cash, USD Cash
-(The table also contains `Bank A` and `Exchange A` — those are conversion PLATFORMS
-(§Fiscal module), not expense payment methods; never tag a transaction with them.)
+**Payment methods:** only `Cash` and `USD Cash` are seeded — the owner adds
+their own banks, cards, and wallets. ALWAYS fetch the live list. Note the same
+table also holds conversion PLATFORMS (§Fiscal module: banks and exchanges used
+in `add_conversion`) — never tag a transaction with a platform-only entry.
 
-(The lists above are seeds; when in doubt fetch live:
+(The category list above is the seed set; when in doubt fetch live:
 `GET /rest/v1/categories?active=eq.true&select=name,kind` and
 `GET /rest/v1/payment_methods?active=eq.true&select=name`.)
 
 ## Group payments
 
-When the owner pays for a group: log the **full amount** as one outflow.
-When someone pays him back: log an **inflow, category Reintegros, with
+When the user pays for a group: log the **full amount** as one outflow.
+When someone pays them back: log an **inflow, category Reintegros, with
 `p_parent_id`** set to the original outflow's id. Find it if needed:
 `GET /rest/v1/v_transactions?type=eq.outflow&order=occurred_on.desc&description=ilike.*<keyword>*`
 Reports automatically net reimbursements against the parent expense.
@@ -91,31 +91,25 @@ netted into their parent's month.
 
 ## Fiscal module (invoices & conversions)
 
-**Recording an invoice** (the owner issued a factura in ARCA and tells you about it):
-`POST /rest/v1/rpc/add_invoice` with `p_issued_on`, `p_invoice_number` (int, e.g. 218),
-`p_amount_ars`, `p_source`. `p_punto_venta` defaults to `"0001"`.
+**Recording an invoice** (the user issued a factura in ARCA and tells you about
+it): `POST /rest/v1/rpc/add_invoice` with `p_issued_on`, `p_invoice_number` (int),
+`p_amount_ars`, `p_source`. `p_punto_venta` defaults to `"0001"`. **Never record
+an invoice the user didn't confirm as actually issued.**
 
 **Recording a conversion** — three kinds (`p_kind`):
 - `crypto_sale`: sold USDC for ARS on an exchange → needs `p_usd_amount` and
-  `p_platform` (Wallet B, Exchange B, Exchange A...). The ARS is en blanco immediately.
+  `p_platform` (the exchange's `payment_methods` entry). The ARS is en blanco
+  immediately.
 - `cash_sale`: sold USD/USDC for ARS *cash* via dealer → `p_usd_amount`,
   `p_platform: "Cash"`.
 - `bank_deposit`: deposited ARS cash into a bank → NO `p_usd_amount`,
-  `p_platform` = the bank (e.g. "Bank A").
+  `p_platform` = the bank's `payment_methods` entry.
 `POST /rest/v1/rpc/add_conversion` with `p_occurred_on`, `p_ars_amount`, plus the
-above. Optional `p_rate_quoted` if the owner mentions the quoted rate.
+above. Optional `p_rate_quoted` if the user mentions the quoted rate.
 
 **Conversions are NOT income.** Salary arriving in USDC is an inflow transaction
 (`add_transaction`, category Sueldo, currency USD); selling that USDC later is a
 conversion. Never create both from one event.
-
-**Suggesting invoices to cover a deposit target:**
-`POST /rest/v1/rpc/suggest_invoices` with `{"p_target_ars": <amount>}`
-(optional `p_min`/`p_max`, defaults 75,000/200,000). Returns an array of amounts.
-Typical flow: read `v_deposit_status` → propose covering `disponible_para_depositar`
-or a user-given target → show the owner the suggested amounts → he issues them in ARCA →
-record each with `add_invoice`. **Never record an invoice he didn't confirm as
-actually issued.**
 
 **Typical fiscal questions** → which surface:
 - "¿Cuánto me queda por depositar?" → `v_deposit_status.restante_por_depositar`
@@ -129,7 +123,7 @@ Input: a bank/card statement (PDF, CSV, screenshot) + which payment method it is
 
 1. Parse every line: date, amount, merchant/description.
 2. Compute `external_ref` per line: `<method-slug>:<YYYY-MM-DD>:<amount>:<merchant-slug>`
-   (lowercase, kebab-case, e.g. `Bank A-credito:2026-07-03:15230.50:carrefour`).
+   (lowercase, kebab-case, e.g. `mybank-credito:2026-07-03:15230.50:carrefour`).
 3. Fetch what's already logged for that window:
    `GET /rest/v1/v_transactions?payment_method=eq.<Method>&occurred_on=gte.<from>&occurred_on=lte.<to>`
 4. Match statement lines to existing rows by date (±1 day) and amount.

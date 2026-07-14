@@ -7,7 +7,9 @@ plus its REST API — any LLM agent (or a Google Form) is the frontend.
 - **What you can change** (categories, currencies, FX source, fiscal module...):
   `docs/configuration.md`
 - **Agents:** read `docs/agent-playbook.md` — it is the entire interface contract.
-- Design spec: `docs/superpowers/specs/2026-07-12-accounting-system-design.md`
+
+Comments referencing "spec §…" point to the original design document, which is
+kept out of the repo because it contains the owner's personal financial details.
 
 ## Layout
 - `supabase/migrations/` — numbered SQL, applied by `scripts/apply_migrations.py`

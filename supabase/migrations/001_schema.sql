@@ -103,9 +103,13 @@ insert into categories (name, kind) values
   ('Regalos recibidos', 'inflow'), ('Rendimientos', 'inflow'),
   ('Otros ingresos', 'inflow');
 
--- The last two (Bank A = the bank account, Exchange A) exist as conversion platforms
--- (spec §5.2/§5.7); the table doubles as the platform list.
+-- Payment methods are personal — only the two universal ones are seeded.
+-- Uncomment/adapt the examples below, or insert rows later; agents fetch the
+-- live list. NOTE: this table doubles as the conversion-platform list for the
+-- fiscal module (banks and exchanges used in add_conversion go here too, but
+-- should never be tagged on expenses — see docs/configuration.md).
 insert into payment_methods (name) values
-  ('Bank A Crédito'), ('Bank A Débito'), ('Wallet A Crédito'), ('Card E'),
-  ('Card D'), ('Wallet C'), ('Exchange B'), ('Bank C'), ('Wallet B Plus'), ('Wallet B'),
-  ('Wallet D'), ('Cash'), ('USD Cash'), ('Bank A'), ('Exchange A');
+  ('Cash'), ('USD Cash');
+-- , ('MyBank Débito'), ('MyBank Crédito')     -- bank cards
+-- , ('Wallet A'), ('PayPal')               -- fintech wallets
+-- , ('MyBank'), ('MyExchange')                -- conversion platforms (fiscal module)

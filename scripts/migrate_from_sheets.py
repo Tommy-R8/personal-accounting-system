@@ -37,7 +37,7 @@ COMBO_RULES = {                 # frozenset of NEW names -> winning category.
     frozenset({"Compras", "Transporte"}): "Transporte",
     frozenset({"Comida", "Compras"}): "Comida",
 }
-LINE_CATEGORY_OVERRIDES = {     # rows with an empty Category cell — the owner 2026-07-13
+LINE_CATEGORY_OVERRIDES = {     # rows with an empty Category cell — confirmed 2026-07-13
     287: "Transporte",   # Uber
     344: "Comida",       # McDonald's
     404: "Salud",        # Farmacia

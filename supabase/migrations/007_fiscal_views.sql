@@ -1,5 +1,5 @@
 -- The five §5.9 metrics, cumulative over all time. Formulas verified against
--- the owner's Overview sheet to the peso (spec §5.9).
+-- the legacy Overview sheet to the peso (spec §5.9).
 create view v_deposit_status as
 with inv as (
   select coalesce(sum(amount_ars), 0) as facturado

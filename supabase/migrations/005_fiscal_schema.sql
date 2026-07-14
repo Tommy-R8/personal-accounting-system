@@ -44,7 +44,7 @@ alter table invoices enable row level security;
 alter table conversions enable row level security;
 alter table monotributo_brackets enable row level security;
 
--- Verified caps from the owner's Overview sheet (D–G, 2025 and 2026 scales).
+-- Verified caps from the legacy Overview sheet (D–G, 2025 and 2026 scales).
 -- A–C and H–K for the current scale are filled at Step 5 (USER CHECKPOINT).
 insert into monotributo_brackets (category, valid_from, annual_cap) values
   ('D', '2025-01-01', 22934610.05), ('E', '2025-01-01', 26977793.60),
@@ -122,64 +122,12 @@ begin
   return v_row;
 end $$;
 
--- Replaces the sheet's ROUND(RANDBETWEEN(75000;200000);-3) workflow: a set of
--- invoice amounts covering a deposit target. Suggestion only — writes nothing.
--- Contract (spec §6.2/§13): sum = target rounded to nearest 1,000; every amount a
--- multiple of 1,000; for targets > p_max every amount is within [p_min, p_max]
--- (guaranteed by picking each amount from the range that keeps the remainder
--- coverable by the invoices still to come); target <= p_max returns one invoice.
-create or replace function suggest_invoices(
-  p_target_ars numeric,
-  p_min numeric default 75000,
-  p_max numeric default 200000
-) returns numeric[]
-language plpgsql volatile as $$
-declare
-  v_target numeric := round(p_target_ars / 1000) * 1000;
-  v_n int;
-  v_remaining numeric;
-  v_amounts numeric[] := '{}';
-  v_lo numeric;
-  v_hi numeric;
-  v_pick numeric;
-begin
-  if p_target_ars <= 0 then
-    raise exception 'target must be positive';
-  end if;
-  if p_min <= 0 or p_max < p_min
-     or p_min % 1000 <> 0 or p_max % 1000 <> 0 then
-    raise exception 'need 0 < p_min <= p_max, both multiples of 1000';
-  end if;
-  if v_target <= p_max then
-    return array[v_target];  -- may be below p_min: cannot invoice above the target
-  end if;
-  v_n := ceil(v_target / p_max);  -- fewest invoices that can carry the target
-  if v_target / v_n < p_min then
-    raise exception 'target % cannot be split into invoices within [%, %]',
-      p_target_ars, p_min, p_max;
-  end if;
-  v_remaining := v_target;
-  for i in reverse v_n .. 2 loop  -- after this pick, i-1 invoices remain
-    v_lo := greatest(p_min, v_remaining - (i - 1) * p_max);
-    v_hi := least(p_max, v_remaining - (i - 1) * p_min);
-    v_pick := round((v_lo + random() * (v_hi - v_lo)) / 1000) * 1000;
-    v_pick := least(greatest(v_pick, v_lo), v_hi);
-    v_amounts := v_amounts || v_pick;
-    v_remaining := v_remaining - v_pick;
-  end loop;
-  v_amounts := v_amounts || v_remaining;  -- in [p_min, p_max] by construction
-  return v_amounts;
-end $$;
-
 revoke execute on function add_invoice(date, int, numeric, text, text, text, text)
   from public, anon, authenticated;
 revoke execute on function add_conversion(
   date, text, numeric, text, text, numeric, numeric, text) from public, anon, authenticated;
-revoke execute on function suggest_invoices(numeric, numeric, numeric)
-  from public, anon, authenticated;
 
 grant execute on function add_invoice(date, int, numeric, text, text, text, text)
   to service_role;
 grant execute on function add_conversion(
   date, text, numeric, text, text, numeric, numeric, text) to service_role;
-grant execute on function suggest_invoices(numeric, numeric, numeric) to service_role;

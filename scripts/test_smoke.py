@@ -37,10 +37,10 @@ def test_seed_categories():
 
 
 def test_seed_payment_methods():
+    # Only Cash / USD Cash are seeded; owners add their own rows, so no exact count.
     pms = rest_get("payment_methods", {"select": "name"})
-    assert len(pms) == 15  # 13 payment methods + Bank A & Exchange A (conversion platforms)
-    assert {"name": "Card E"} in pms
-    assert {"name": "Bank A"} in pms
+    assert {"name": "Cash"} in pms
+    assert {"name": "USD Cash"} in pms
 
 
 def test_trigger_blocks_kind_mismatch_on_direct_insert():
@@ -129,7 +129,7 @@ def test_rate_snapshot_uses_latest_available_day():
 
 
 def test_names_resolve_case_insensitively():
-    r = add(p_category="salidas", p_payment_method="Wallet C")
+    r = add(p_category="salidas", p_payment_method="cash")
     assert r.status_code == 200, r.text
     assert r.json()["category_id"] is not None
 
@@ -258,7 +258,7 @@ def add_conversion(**kw):
         "p_kind": "crypto_sale",
         "p_ars_amount": 150000,
         "p_usd_amount": 100,
-        "p_platform": "Wallet B",
+        "p_platform": "Cash",  # any active payment_methods row works as a platform
         "p_source": "test",
     }
     payload.update(kw)
@@ -293,7 +293,7 @@ def test_bank_deposit_rejects_usd():
 
 
 def test_bank_deposit_ok_without_usd():
-    r = add_conversion(p_kind="bank_deposit", p_usd_amount=None, p_platform="Bank A")
+    r = add_conversion(p_kind="bank_deposit", p_usd_amount=None, p_platform="Cash")
     assert r.status_code == 200, r.text
     assert r.json()["rate_effective"] is None
 
@@ -312,21 +312,6 @@ def test_brackets_seeded_current_scale():
     assert abs(float(d["annual_cap"]) - 26212853.42) < 0.01
 
 
-def test_suggest_invoices_properties():
-    r = rpc("suggest_invoices", {"p_target_ars": 1044320})
-    assert r.status_code == 200, r.text
-    amounts = [float(a) for a in r.json()]
-    assert all(a % 1000 == 0 for a in amounts)
-    assert all(75000 <= a <= 200000 for a in amounts)  # spec §13: EVERY amount
-    assert abs(sum(amounts) - 1044320) <= 500  # = target rounded to nearest 1000
-
-
-def test_suggest_invoices_small_target_single_invoice():
-    r = rpc("suggest_invoices", {"p_target_ars": 120000})
-    assert r.status_code == 200, r.text
-    assert [float(a) for a in r.json()] == [120000.0]
-
-
 # --- Task 7: fiscal views -------------------------------------------------------
 
 def _deposit_status():
@@ -341,7 +326,7 @@ def test_deposit_status_metrics_move_correctly():
     add_conversion(p_kind="cash_sale", p_ars_amount=50000, p_usd_amount=35,
                    p_platform="Cash")
     add_conversion(p_kind="bank_deposit", p_ars_amount=20000, p_usd_amount=None,
-                   p_platform="Bank A")
+                   p_platform="Cash")
     after = _deposit_status()
     assert after["total_facturado"] - before["total_facturado"] == 300000
     assert after["total_depositado"] - before["total_depositado"] == 120000  # crypto+deposit
