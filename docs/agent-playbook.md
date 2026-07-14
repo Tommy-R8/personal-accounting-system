@@ -27,10 +27,10 @@ Content-Type: application/json
 | `p_description` | yes | short, as the user phrased it |
 | `p_category` | yes | one of the lists below (case-insensitive) |
 | `p_amount` | yes | positive number, original currency |
-| `p_source` | yes | your agent name: `claude`, `hermes`, `statement`, ... |
+| `p_source` | yes | your agent name: `claude`, `telegram-bot`, `statement`, ... |
 | `p_currency` | no | `ARS` (default) or `USD` |
 | `p_fiscal` | no | default `true` (Blanco). Set `false` only if the user says en negro / sin factura. |
-| `p_tags` | no | kebab-case strings, e.g. `["viaje-brasil"]` |
+| `p_tags` | no | kebab-case strings, e.g. `["viaje-enero"]` |
 | `p_payment_method` | no | one of the list below; omit if not mentioned |
 | `p_parent_id` | no | reimbursements only: uuid of the group outflow being repaid |
 | `p_external_ref` | no | statement imports only, see below |
@@ -79,7 +79,7 @@ Examples:
 ```
 GET /rest/v1/v_monthly_summary?month=eq.2026-06-01&type=eq.outflow
 GET /rest/v1/v_transactions?occurred_on=gte.2026-06-01&category=eq.Salidas
-GET /rest/v1/v_transactions?tags=cs.{viaje-brasil}
+GET /rest/v1/v_transactions?tags=cs.{viaje-enero}
 ```
 
 Anything the views can't express — ad-hoc SQL (single SELECT only):

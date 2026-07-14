@@ -30,10 +30,9 @@ def cleanup():
 
 def test_seed_categories():
     cats = rest_get("categories", {"select": "name,kind"})
-    assert len(cats) == 18
+    # Reintegros is load-bearing (reimbursement flow); owners may add more rows.
     assert {"name": "Salidas", "kind": "outflow"} in cats
     assert {"name": "Reintegros", "kind": "inflow"} in cats
-    assert not any(c["name"] == "Educación" for c in cats)
 
 
 def test_seed_payment_methods():
