@@ -36,10 +36,10 @@ def test_seed_categories():
 
 
 def test_seed_payment_methods():
-    # Only Cash / USD Cash are seeded; owners add their own rows, so no exact count.
+    # Only Cash ARS / Cash USD are seeded; owners add their own rows, so no exact count.
     pms = rest_get("payment_methods", {"select": "name"})
-    assert {"name": "Cash"} in pms
-    assert {"name": "USD Cash"} in pms
+    assert {"name": "Cash ARS"} in pms
+    assert {"name": "Cash USD"} in pms
 
 
 def test_trigger_blocks_kind_mismatch_on_direct_insert():
@@ -128,7 +128,7 @@ def test_rate_snapshot_uses_latest_available_day():
 
 
 def test_names_resolve_case_insensitively():
-    r = add(p_category="salidas", p_payment_method="cash")
+    r = add(p_category="salidas", p_payment_method="cash ars")
     assert r.status_code == 200, r.text
     assert r.json()["category_id"] is not None
 
@@ -257,7 +257,7 @@ def add_conversion(**kw):
         "p_kind": "crypto_sale",
         "p_ars_amount": 150000,
         "p_usd_amount": 100,
-        "p_platform": "Cash",  # any active payment_methods row works as a platform
+        "p_platform": "Cash ARS",  # any active payment_methods row works as a platform
         "p_source": "test",
     }
     payload.update(kw)
@@ -292,7 +292,7 @@ def test_bank_deposit_rejects_usd():
 
 
 def test_bank_deposit_ok_without_usd():
-    r = add_conversion(p_kind="bank_deposit", p_usd_amount=None, p_platform="Cash")
+    r = add_conversion(p_kind="bank_deposit", p_usd_amount=None, p_platform="Cash ARS")
     assert r.status_code == 200, r.text
     assert r.json()["rate_effective"] is None
 
@@ -323,9 +323,9 @@ def test_deposit_status_metrics_move_correctly():
     add_invoice(n=902, p_amount_ars=300000)
     add_conversion(p_kind="crypto_sale", p_ars_amount=100000, p_usd_amount=70)
     add_conversion(p_kind="cash_sale", p_ars_amount=50000, p_usd_amount=35,
-                   p_platform="Cash")
+                   p_platform="Cash ARS")
     add_conversion(p_kind="bank_deposit", p_ars_amount=20000, p_usd_amount=None,
-                   p_platform="Cash")
+                   p_platform="Cash ARS")
     after = _deposit_status()
     assert after["total_facturado"] - before["total_facturado"] == 300000
     assert after["total_depositado"] - before["total_depositado"] == 120000  # crypto+deposit

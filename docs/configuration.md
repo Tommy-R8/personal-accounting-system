@@ -22,8 +22,8 @@ Agents can always fetch the live list:
 
 ## Payment methods & conversion platforms (data)
 
-Rows in `payment_methods`, same pattern (`active` flag, live SQL). Only `Cash`
-and `USD Cash` are seeded — add your own banks / cards / wallets (commented
+Rows in `payment_methods`, same pattern (`active` flag, live SQL). Only `Cash ARS`
+and `Cash USD` are seeded — add your own banks / cards / wallets (commented
 examples in `001_schema.sql`). One quirk: the table doubles as the
 **conversion platform** list for the fiscal module — the banks and exchanges
 you use in `add_conversion` also live here, but are not expense payment

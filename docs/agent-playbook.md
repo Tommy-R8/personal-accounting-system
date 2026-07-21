@@ -44,7 +44,7 @@ do not ask the user unless genuinely ambiguous.
 Suscripciones, Impuestos, Hogar, Servicios, Salud, Viajes, Otros gastos
 **Categories — inflow:** Sueldo, Freelance, Reintegros, Regalos recibidos,
 Rendimientos, Otros ingresos
-**Payment methods:** only `Cash` and `USD Cash` are seeded — the owner adds
+**Payment methods:** only `Cash ARS` and `Cash USD` are seeded — the owner adds
 their own banks, cards, and wallets. ALWAYS fetch the live list. Note the same
 table also holds conversion PLATFORMS (§Fiscal module: banks and exchanges used
 in `add_conversion`) — never tag a transaction with a platform-only entry.
@@ -101,7 +101,7 @@ an invoice the user didn't confirm as actually issued.**
   `p_platform` (the exchange's `payment_methods` entry). The ARS is en blanco
   immediately.
 - `cash_sale`: sold USD/USDC for ARS *cash* via dealer → `p_usd_amount`,
-  `p_platform: "Cash"`.
+  `p_platform: "Cash ARS"`.
 - `bank_deposit`: deposited ARS cash into a bank → NO `p_usd_amount`,
   `p_platform` = the bank's `payment_methods` entry.
 `POST /rest/v1/rpc/add_conversion` with `p_occurred_on`, `p_ars_amount`, plus the
