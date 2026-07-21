@@ -109,7 +109,7 @@ insert into categories (name, kind) values
 -- fiscal module (banks and exchanges used in add_conversion go here too, but
 -- should never be tagged on expenses — see docs/configuration.md).
 insert into payment_methods (name) values
-  ('Cash'), ('USD Cash');
+  ('Cash ARS'), ('Cash USD');
 -- , ('MyBank Débito'), ('MyBank Crédito')     -- bank cards
 -- , ('MercadoPago'), ('PayPal')               -- fintech wallets
 -- , ('MyBank'), ('MyExchange')                -- conversion platforms (fiscal module)
