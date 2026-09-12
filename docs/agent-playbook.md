@@ -93,8 +93,9 @@ netted into their parent's month.
 
 **Recording an invoice** (the user issued a factura in ARCA and tells you about
 it): `POST /rest/v1/rpc/add_invoice` with `p_issued_on`, `p_invoice_number` (int),
-`p_amount_ars`, `p_source`. `p_punto_venta` defaults to `"0001"`. **Never record
-an invoice the user didn't confirm as actually issued.**
+`p_amount_ars`, `p_source`, and `p_concept` (the description printed on the
+factura, e.g. `"Servicios Varios"`) when known. `p_punto_venta` defaults to
+`"0001"`. **Never record an invoice the user didn't confirm as actually issued.**
 
 **Recording a conversion** — three kinds (`p_kind`):
 - `crypto_sale`: sold USDC for ARS on an exchange → needs `p_usd_amount` and
@@ -116,6 +117,47 @@ conversion. Never create both from one event.
 - "¿Cómo vengo con el monotributo?" → `v_monotributo_status` (watch `cap_exceeded`
   and `headroom` of his current category)
 - "¿Facturé más de lo que gasté en blanco?" → `v_fiscal_balance`
+
+## Weekly invoice batch
+
+The owner invoices in fixed weekly batches so the month lands on a target. A
+cron (yours to set up — Telegram, email, whatever the owner uses) should run
+this flow once per `batch_weekday`:
+
+1. `POST /rest/v1/rpc/suggest_invoice_batch` with body `{}`. Response:
+   ```json
+   {"month": "2026-09", "monthly_target_ars": 2200000, "invoiced_so_far": 1075000,
+    "remaining": 1125000, "batches_left": 2, "batch_target": 563000,
+    "warning": null, "reason": null,
+    "invoices": [{"concept": "Asesoramiento Comercial", "amount_ars": 176000}, ...]}
+   ```
+2. Show the owner the batch as a numbered list — `1. Asesoramiento Comercial — $176.000`
+   — then one line: *invoiced so far $X of $Y, N batches left this month*.
+   If `warning` or `reason` is set, quote it verbatim. An empty `invoices` list
+   means the target is already covered: say so and stop.
+3. Wait. The owner issues the facturas in ARCA and replies with the comprobante
+   numbers (and any amount they changed).
+4. Record each one with `add_invoice` (`p_issued_on`, `p_invoice_number`,
+   `p_amount_ars`, `p_concept`, `p_source`). Never record an invoice the owner
+   did not confirm; never re-run step 1 to "refresh" a batch that was already
+   partly issued — record what was issued first.
+
+The RPC writes nothing and is safe to call any number of times. It sizes each
+batch as `(monthly_target − invoiced this month) ÷ batches left`, so a heavy
+week is followed by lighter ones automatically.
+
+**Changing the settings** (the owner asks to raise the target, change bands,
+etc.): read the row, edit the JSON, write the whole value back:
+
+```
+GET   /rest/v1/settings?key=eq.invoicing&select=value
+PATCH /rest/v1/settings?key=eq.invoicing     body: {"value": { ...edited json... }}
+```
+
+Fields: `monthly_target_ars`, `batch_size`, `batch_weekday` (ISO, 1 = Monday …
+7 = Sunday), `round_to`, and `bands` — each with `concept`, `min`, `max`,
+`count_min`, `count_max`. `batch_size` must lie between the sum of the bands'
+`count_min` and the sum of their `count_max`; the RPC tells you if it doesn't.
 
 ## Statement import workflow
 
