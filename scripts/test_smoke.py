@@ -374,3 +374,50 @@ def test_monotributo_view_ignores_future_scales():
         cap = float(cur.fetchone()[0])
         conn.rollback()  # discard the future-dated row — no cleanup needed
     assert cap == 26212853.42  # a scale that hasn't taken effect must be ignored
+
+
+# --- Task 9: invoice batch suggestion -----------------------------------------
+
+from lib import rest_patch  # noqa: E402  (kept next to the tests that use it)
+
+INVOICING_TEST_CFG = {
+    "monthly_target_ars": 1000000,
+    "batch_size": 5,
+    "batch_weekday": 5,
+    "round_to": 1000,
+    "bands": [
+        {"concept": "Asesoramiento Comercial", "min": 110000, "max": 200000,
+         "count_min": 2, "count_max": 3},
+        {"concept": "Servicios Varios", "min": 75000, "max": 120000,
+         "count_min": 2, "count_max": 3},
+    ],
+}
+
+
+def set_invoicing(cfg):
+    rest_patch("settings", {"key": "eq.invoicing"}, {"value": cfg})
+
+
+@pytest.fixture
+def invoicing_cfg():
+    """Swap in a known config for one test, restore the owner's row afterwards."""
+    original = rest_get("settings", {"key": "eq.invoicing", "select": "value"})[0]["value"]
+    set_invoicing(INVOICING_TEST_CFG)
+    yield dict(INVOICING_TEST_CFG)
+    set_invoicing(original)
+
+
+def test_settings_seeded():
+    rows = rest_get("settings", {"key": "eq.invoicing", "select": "value"})
+    assert len(rows) == 1
+    v = rows[0]["value"]
+    assert {"monthly_target_ars", "batch_size", "batch_weekday", "round_to", "bands"} <= set(v)
+
+
+def test_add_invoice_stores_concept():
+    r = add_invoice(n=904, p_concept="Servicios Varios")
+    assert r.status_code == 200, r.text
+    assert r.json()["concept"] == "Servicios Varios"
+    r = add_invoice(n=905)
+    assert r.status_code == 200, r.text
+    assert r.json()["concept"] is None
