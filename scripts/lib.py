@@ -43,3 +43,11 @@ def rest_delete(path, params):
         f"{SUPABASE_URL}/rest/v1/{path}", params=params, headers=HEADERS, timeout=30
     )
     r.raise_for_status()
+
+
+def rest_patch(path, params, body):
+    r = requests.patch(
+        f"{SUPABASE_URL}/rest/v1/{path}", params=params, json=body, headers=HEADERS, timeout=30
+    )
+    r.raise_for_status()
+    return r.json()
