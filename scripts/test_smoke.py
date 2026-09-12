@@ -2,6 +2,8 @@
 and are cleaned up by the session fixture. Run from repo root:
     python -m pytest scripts/test_smoke.py -v
 """
+from datetime import date
+
 import psycopg
 import pytest
 
@@ -472,8 +474,7 @@ def test_batch_properties(invoicing_cfg):
 
 
 def test_batch_self_corrects_and_avoids_used_amounts(invoicing_cfg):
-    from datetime import date
-    cfg = set_target_per_batch(invoicing_cfg, 600000)
+    set_target_per_batch(invoicing_cfg, 600000)
     before = suggest()
     today = date.today().isoformat()
     r1 = add_invoice(n=951, p_issued_on=today, p_amount_ars=133000, p_concept="Asesoramiento Comercial")
@@ -481,6 +482,7 @@ def test_batch_self_corrects_and_avoids_used_amounts(invoicing_cfg):
     assert r1.status_code == 200 and r2.status_code == 200, (r1.text, r2.text)
     after = suggest()
     assert float(after["invoiced_so_far"]) == float(before["invoiced_so_far"]) + 224000
+    # Python's banker's rounding agrees with Postgres here: 224000 / batches_left never yields an exact .5 thousand.
     expected_target = round((float(after["remaining"]) / after["batches_left"]) / 1000) * 1000
     assert float(after["batch_target"]) == expected_target
     for _ in range(50):
