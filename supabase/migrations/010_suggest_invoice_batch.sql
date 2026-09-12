@@ -80,7 +80,6 @@ declare
   v_max          numeric;
   v_tries        int;
   v_out          jsonb;
-  i int; j int;
 begin
   -- 1. settings
   select value into s from settings where key = 'invoicing';
@@ -93,7 +92,7 @@ begin
   v_round      := (s->>'round_to')::numeric;
   v_bands      := s->'bands';
   if v_target is null or v_batch_size is null or v_weekday is null or v_round is null
-     or jsonb_typeof(v_bands) <> 'array' or jsonb_array_length(v_bands) = 0 then
+     or v_bands is null or jsonb_typeof(v_bands) <> 'array' or jsonb_array_length(v_bands) = 0 then
     raise exception 'settings.invoicing needs monthly_target_ars, batch_size, batch_weekday, round_to and a non-empty bands array';
   end if;
   if v_weekday not between 1 and 7 or v_round <= 0 or v_batch_size < 1 then
@@ -106,7 +105,8 @@ begin
        or (v_bands->i->>'count_max') is null then
       raise exception 'settings.invoicing.bands[%] needs concept, min, max, count_min, count_max', i;
     end if;
-    if (v_bands->i->>'min')::numeric > (v_bands->i->>'max')::numeric
+    if (v_bands->i->>'min')::numeric < 0
+       or (v_bands->i->>'min')::numeric > (v_bands->i->>'max')::numeric
        or (v_bands->i->>'count_min')::int < 0
        or (v_bands->i->>'count_min')::int > (v_bands->i->>'count_max')::int then
       raise exception 'settings.invoicing.bands[%]: need 0 <= min <= max and 0 <= count_min <= count_max', i;
@@ -234,5 +234,6 @@ end $$;
 
 revoke execute on function _batch_bound(jsonb, int, boolean, boolean)
   from public, anon, authenticated;
+grant execute on function _batch_bound(jsonb, int, boolean, boolean) to service_role;
 revoke execute on function suggest_invoice_batch() from public, anon, authenticated;
 grant execute on function suggest_invoice_batch() to service_role;
