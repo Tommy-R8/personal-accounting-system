@@ -62,6 +62,12 @@ with your currency's official rate API — everything downstream only reads the
   `v_monotributo_status` picks the right scale by date.
 - **Punto de venta** (code): invoice numbering defaults to `'0001'`
   (`add_invoice` in `005`).
+- **Invoice batch settings** (data): the `settings` row with key `invoicing`
+  (seeded in `009`). Set `monthly_target_ars` to your own number before the
+  first `suggest_invoice_batch` call — the seed value is a placeholder. The
+  two seeded `bands` (descriptions + amount ranges) are examples; edit them to
+  match what you actually invoice. Field reference: `docs/agent-playbook.md`
+  → "Weekly invoice batch".
 
 Not in Argentina? The core ledger (transactions, categories, views) works
 standalone — just never call `add_invoice`/`add_conversion`, or drop
