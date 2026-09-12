@@ -421,3 +421,105 @@ def test_add_invoice_stores_concept():
     r = add_invoice(n=905)
     assert r.status_code == 200, r.text
     assert r.json()["concept"] is None
+
+
+def suggest():
+    r = rpc("suggest_invoice_batch", {})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def band_of(cfg, amount, concept):
+    (b,) = [b for b in cfg["bands"] if b["concept"] == concept]
+    return b["min"] <= amount <= b["max"]
+
+
+def set_target_per_batch(cfg, per_batch):
+    """Point monthly_target so that this batch's target is exactly per_batch,
+    whatever is already invoiced this month (real invoices count too)."""
+    state = suggest()
+    cfg["monthly_target_ars"] = float(state["invoiced_so_far"]) + state["batches_left"] * per_batch
+    set_invoicing(cfg)
+    return cfg
+
+
+def test_batch_properties(invoicing_cfg):
+    cfg = set_target_per_batch(invoicing_cfg, 600000)
+    for _ in range(200):
+        out = suggest()
+        assert out["warning"] is None, out
+        assert out["reason"] is None
+        assert float(out["batch_target"]) == 600000
+        inv = out["invoices"]
+        assert len(inv) == cfg["batch_size"]
+        amounts = [float(i["amount_ars"]) for i in inv]
+        assert len(set(amounts)) == len(amounts), "repeated amount"
+        for i in inv:
+            a = float(i["amount_ars"])
+            assert a % cfg["round_to"] == 0
+            assert band_of(cfg, a, i["concept"]), i
+        for b in cfg["bands"]:
+            n = sum(1 for i in inv if i["concept"] == b["concept"])
+            assert b["count_min"] <= n <= b["count_max"], inv
+        assert abs(sum(amounts) - 600000) <= cfg["round_to"] * len(inv) / 2
+        # ordered by band (settings order) then amount desc
+        concepts = [i["concept"] for i in inv]
+        order = [b["concept"] for b in cfg["bands"]]
+        assert concepts == sorted(concepts, key=order.index)
+        for b in cfg["bands"]:
+            xs = [float(i["amount_ars"]) for i in inv if i["concept"] == b["concept"]]
+            assert xs == sorted(xs, reverse=True)
+
+
+def test_batch_self_corrects_and_avoids_used_amounts(invoicing_cfg):
+    from datetime import date
+    cfg = set_target_per_batch(invoicing_cfg, 600000)
+    before = suggest()
+    today = date.today().isoformat()
+    r1 = add_invoice(n=951, p_issued_on=today, p_amount_ars=133000, p_concept="Asesoramiento Comercial")
+    r2 = add_invoice(n=952, p_issued_on=today, p_amount_ars=91000, p_concept="Servicios Varios")
+    assert r1.status_code == 200 and r2.status_code == 200, (r1.text, r2.text)
+    after = suggest()
+    assert float(after["invoiced_so_far"]) == float(before["invoiced_so_far"]) + 224000
+    expected_target = round((float(after["remaining"]) / after["batches_left"]) / 1000) * 1000
+    assert float(after["batch_target"]) == expected_target
+    for _ in range(50):
+        amounts = {float(i["amount_ars"]) for i in suggest()["invoices"]}
+        assert not amounts & {133000.0, 91000.0}
+
+
+def test_batch_empty_when_target_reached(invoicing_cfg):
+    cfg = set_target_per_batch(invoicing_cfg, 0)
+    out = suggest()
+    assert out["invoices"] == []
+    assert out["reason"] == "monthly target reached"
+    assert out["warning"] is None
+
+
+def test_batch_shrinks_when_target_small(invoicing_cfg):
+    # 300k fits 3 invoices at the 75k floor but not 5 (floor 445k) or 4 (370k).
+    cfg = set_target_per_batch(invoicing_cfg, 300000)
+    out = suggest()
+    assert out["reason"] is None
+    assert len(out["invoices"]) == 3
+    amounts = [float(i["amount_ars"]) for i in out["invoices"]]
+    assert abs(sum(amounts) - 300000) <= cfg["round_to"] * 3 / 2
+    for i in out["invoices"]:
+        assert band_of(cfg, float(i["amount_ars"]), i["concept"])
+
+
+def test_batch_capped_when_target_huge(invoicing_cfg):
+    # ceil for 5 with the test bands = 3*200k + 2*120k = 840k.
+    set_target_per_batch(invoicing_cfg, 5000000)
+    out = suggest()
+    assert float(out["batch_target"]) == 840000
+    assert "capped at 840000" in out["warning"]
+    assert len(out["invoices"]) == 5
+
+
+def test_batch_size_outside_band_envelope_is_rejected(invoicing_cfg):
+    cfg = dict(invoicing_cfg, batch_size=10)
+    set_invoicing(cfg)
+    r = rpc("suggest_invoice_batch", {})
+    assert r.status_code == 400
+    assert "batch_size" in r.json()["message"]
