@@ -669,3 +669,93 @@ def test_installments_out_of_range(make_card, n):
     r = add(p_payment_method=make_card(), p_installments=n)
     assert r.status_code == 400
     assert "between 1 and 60" in r.json()["message"]
+
+# --- Task 12: card schedule + statements --------------------------------------
+
+def schedule(tx_id):
+    return rest_get("v_card_schedule", {"transaction_id": f"eq.{tx_id}",
+                                        "order": "installment_no"})
+
+
+def test_cuotas_sum_exactly_to_purchase(make_card):
+    # No peso may be lost or invented by rounding: the owner reconciles
+    # these against real statements.
+    tx = add(p_amount=100000, p_payment_method=make_card(), p_installments=3).json()
+    amounts = [float(c["installment_amount"]) for c in schedule(tx["id"])]
+    assert amounts == [33333.33, 33333.33, 33333.34]
+
+
+def test_cuotas_land_in_consecutive_estimated_cycles(make_card):
+    card = make_card(closing_day=20, due_day=5)
+    tx = add(p_payment_method=card, p_installments=3).json()  # bought 2026-07-06
+    rows = schedule(tx["id"])
+    assert [(c["installment_no"], c["closing_date"], c["due_date"], c["is_estimated"])
+            for c in rows] == [
+        (1, "2026-07-20", "2026-08-05", True),
+        (2, "2026-08-20", "2026-09-05", True),
+        (3, "2026-09-20", "2026-10-05", True),
+    ]
+
+
+def test_purchase_after_closing_goes_to_next_cycle(make_card):
+    tx = add(p_occurred_on="2026-07-21", p_payment_method=make_card()).json()
+    assert schedule(tx["id"])[0]["closing_date"] == "2026-08-20"
+
+
+def test_purchase_on_closing_day_lands_in_that_cycle(make_card):
+    tx = add(p_occurred_on="2026-07-20", p_payment_method=make_card()).json()
+    assert schedule(tx["id"])[0]["closing_date"] == "2026-07-20"
+
+
+def test_one_payment_purchase_appears_once(make_card):
+    tx = add(p_payment_method=make_card()).json()
+    rows = schedule(tx["id"])
+    assert len(rows) == 1
+    assert (rows[0]["installment_no"], rows[0]["installments"]) == (1, 1)
+
+
+def test_real_cycle_moves_cuotas_without_touching_stored_data(make_card):
+    # The calendar is computed: recording the real cycle must fix it with no
+    # migration of stored rows.
+    card = make_card()
+    tx = add(p_payment_method=card, p_installments=2).json()
+    assert add_cycle(card, "2026-08-27", "2026-09-08").status_code == 200
+    rows = schedule(tx["id"])
+    assert (rows[0]["closing_date"], rows[0]["is_estimated"]) == ("2026-07-20", True)
+    assert (rows[1]["closing_date"], rows[1]["due_date"], rows[1]["is_estimated"]) == \
+        ("2026-08-27", "2026-09-08", False)
+
+
+def test_closing_day_clamps_to_month_end(make_card):
+    tx = add(p_occurred_on="2026-09-10", p_payment_method=make_card(closing_day=31)).json()
+    assert schedule(tx["id"])[0]["closing_date"] == "2026-09-30"
+
+
+def test_due_same_month_when_due_day_after_closing(make_card):
+    tx = add(p_occurred_on="2026-07-01",
+             p_payment_method=make_card(closing_day=5, due_day=15)).json()
+    row = schedule(tx["id"])[0]
+    assert (row["closing_date"], row["due_date"]) == ("2026-07-05", "2026-07-15")
+
+
+def test_non_card_purchase_not_in_schedule():
+    tx = add(p_payment_method="Cash ARS").json()
+    assert schedule(tx["id"]) == []
+
+
+def test_card_inflow_not_in_schedule(make_card):
+    # A refund to the card is not a charge; it must not inflate the statement.
+    tx = add(p_type="inflow", p_category="Reintegros", p_payment_method=make_card()).json()
+    assert schedule(tx["id"]) == []
+
+
+def test_statements_total_by_currency(make_card):
+    card = make_card()
+    add(p_payment_method=card, p_amount=1000)
+    add(p_payment_method=card, p_amount=500)
+    add(p_payment_method=card, p_amount=50, p_currency="USD")
+    rows = rest_get("v_card_statements", {"payment_method": f"eq.{card}",
+                                          "closing_date": "eq.2026-07-20",
+                                          "order": "currency"})
+    assert [(r["currency"], float(r["total"]), r["installment_count"]) for r in rows] == \
+        [("ARS", 1500.0, 2), ("USD", 50.0, 1)]
