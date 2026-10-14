@@ -166,13 +166,22 @@ Input: a bank/card statement (PDF, CSV, screenshot) + which payment method it is
 1. Parse every line: date, amount, merchant/description.
 2. Compute `external_ref` per line: `<method-slug>:<YYYY-MM-DD>:<amount>:<merchant-slug>`
    (lowercase, kebab-case, e.g. `mybank-credito:2026-07-03:15230.50:carrefour`).
-3. Fetch what's already logged for that window:
-   `GET /rest/v1/v_transactions?payment_method=eq.<Method>&occurred_on=gte.<from>&occurred_on=lte.<to>`
+3. Fetch what's already logged for that window — rows of this method **and**
+   rows logged without a method (the owner often omits it):
+   `GET /rest/v1/v_transactions?or=(payment_method.eq."<Method>",payment_method.is.null)&occurred_on=gte.<from>&occurred_on=lte.<to>`
 4. Match statement lines to existing rows by date (±1 day) and amount.
-5. Show the user ONLY the unmatched lines with proposed categories; wait for approval.
-6. Insert approved lines via `add_transaction` with `p_source="statement"` and
-   `p_external_ref` set. A duplicate `external_ref` error means it was already
-   imported — skip it silently.
+5. Show the user the unmatched lines with proposed categories, plus the lines
+   that matched a row **without** a method, as "complete with <Method>"; wait
+   for approval.
+6. Insert approved unmatched lines via `add_transaction` with
+   `p_source="statement"` and `p_external_ref` set. A duplicate `external_ref`
+   error means it was already imported — skip it silently.
+7. For each approved "complete" line, set the method and the line's ref on the
+   existing row, so the next import matches it by ref instead of re-proposing it
+   (`id` from `GET /rest/v1/payment_methods?name=eq.<Method>&select=id`):
+   `PATCH /rest/v1/transactions?id=eq.<row id>&payment_method_id=is.null`
+   body `{"payment_method_id": <id>, "external_ref": "<ref>"}`.
+   The `is.null` filter makes the PATCH a no-op on a row that already got a method.
 
 ## Sanity checks (curl)
 
