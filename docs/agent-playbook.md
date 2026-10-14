@@ -35,6 +35,7 @@ Content-Type: application/json
 | `p_parent_id` | no | reimbursements only: uuid of the group outflow being repaid |
 | `p_external_ref` | no | statement imports only, see below |
 | `p_notes` | no | anything extra worth keeping |
+| `p_installments` | no | credit card purchases in cuotas only: number of cuotas (2–60). The amount is the **total** paid (sum of all cuotas). Omit for 1 payment. |
 
 Success returns the inserted row (JSON) including `id`, `usd_rate`, `amount_usd`.
 Errors are descriptive (e.g. list the valid categories) — fix the input and retry;
@@ -159,6 +160,19 @@ Fields: `monthly_target_ars`, `batch_size`, `batch_weekday` (ISO, 1 = Monday …
 `count_min`, `count_max`. `batch_size` must lie between the sum of the bands'
 `count_min` and the sum of their `count_max`; the RPC tells you if it doesn't.
 
+## Credit card statements
+
+- **Never record the payment of a card statement** ("pagué la Visa"). Every
+  purchase on it is already recorded; tell the owner so.
+- "¿Cuánto pago de la Visa?" / "¿cuánto me viene el mes que viene?" →
+  `GET /rest/v1/v_card_statements?payment_method=eq.<Card>&closing_date=gte.<today>&order=closing_date&limit=2`
+  (one row per currency). `is_estimated = true` means the cycle dates are the
+  card's default days, not yet confirmed by a real statement.
+- "¿Cuánto tengo comprometido en cuotas?" → sum `installment_amount` from
+  `v_card_schedule` with `closing_date=gte.<today>` and `installments=gt.1`.
+- Purchase with interest: `p_amount` is the total of the cuotas; put the list
+  price in `p_notes`.
+
 ## Statement import workflow
 
 Input: a bank/card statement (PDF, CSV, screenshot) + which payment method it is.
@@ -166,17 +180,28 @@ Input: a bank/card statement (PDF, CSV, screenshot) + which payment method it is
 1. Parse every line: date, amount, merchant/description.
 2. Compute `external_ref` per line: `<method-slug>:<YYYY-MM-DD>:<amount>:<merchant-slug>`
    (lowercase, kebab-case, e.g. `mybank-credito:2026-07-03:15230.50:carrefour`).
-3. Fetch what's already logged for that window — rows of this method **and**
+3. **Card statements only:** record the statement's cycle and the next one with
+   `add_card_cycle` (`p_payment_method`, `p_closing_date`, `p_due_date`,
+   `p_source="statement"`) — "cierre/vencimiento actual" and "próximo
+   cierre/vencimiento". Re-recording a month replaces it; that is expected.
+4. **Cuota lines** (`CUOTA k/n`, or `k/n` next to the merchant): the purchase
+   total is `cuota amount × n`, its date is the original purchase date printed
+   on the line, and its `external_ref` is built from the **purchase**
+   (`<method-slug>:<original date>:<total>:<merchant-slug>`), so every month's
+   cuota line maps to the same ref. Match it like any line but by original date
+   and total (± n pesos for rounding). Unmatched → propose it and insert with
+   `p_installments = n`.
+5. Fetch what's already logged for that window — rows of this method **and**
    rows logged without a method (the owner often omits it):
    `GET /rest/v1/v_transactions?or=(payment_method.eq."<Method>",payment_method.is.null)&occurred_on=gte.<from>&occurred_on=lte.<to>`
-4. Match statement lines to existing rows by date (±1 day) and amount.
-5. Show the user the unmatched lines with proposed categories, plus the lines
+6. Match statement lines to existing rows by date (±1 day) and amount.
+7. Show the user the unmatched lines with proposed categories, plus the lines
    that matched a row **without** a method, as "complete with <Method>"; wait
    for approval.
-6. Insert approved unmatched lines via `add_transaction` with
+8. Insert approved unmatched lines via `add_transaction` with
    `p_source="statement"` and `p_external_ref` set. A duplicate `external_ref`
    error means it was already imported — skip it silently.
-7. For each approved "complete" line, set the method and the line's ref on the
+9. For each approved "complete" line, set the method and the line's ref on the
    existing row, so the next import matches it by ref instead of re-proposing it
    (`id` from `GET /rest/v1/payment_methods?name=eq.<Method>&select=id`):
    `PATCH /rest/v1/transactions?id=eq.<row id>&payment_method_id=is.null`
