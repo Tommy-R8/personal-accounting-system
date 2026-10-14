@@ -29,6 +29,14 @@ examples in `001_schema.sql`). One quirk: the table doubles as the
 you use in `add_conversion` also live here, but are not expense payment
 methods; agents are told never to tag a transaction with a platform-only entry.
 
+**Credit cards** (installments / statement projection): flag a card row once.
+Both default days are required; they are only used for months with no real
+cycle recorded from a statement.
+
+    update payment_methods
+       set is_credit_card = true, default_closing_day = 24, default_due_day = 5
+     where name = 'MyBank Crédito';
+
 ## Currencies (code — invasive)
 
 `ARS` and `USD` are hard-wired: a check constraint on `transactions.currency`
