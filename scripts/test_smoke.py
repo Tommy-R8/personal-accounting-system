@@ -609,3 +609,63 @@ def test_add_card_cycle_keeps_other_months(make_card):
     pm_id = r.json()["payment_method_id"]
     rows = rest_get("card_cycles", {"payment_method_id": f"eq.{pm_id}", "select": "id"})
     assert len(rows) == 2
+
+# --- Task 11: installment plans ---------------------------------------------
+
+def plan_of(tx_id):
+    return rest_get("installment_plans", {"transaction_id": f"eq.{tx_id}",
+                                          "select": "installments"})
+
+
+def test_installments_create_plan_on_one_transaction(make_card):
+    r = add(p_amount=600000, p_payment_method=make_card(), p_installments=6)
+    assert r.status_code == 200, r.text
+    tx = r.json()
+    assert plan_of(tx["id"]) == [{"installments": 6}]
+
+
+def test_installment_purchase_is_full_amount_on_purchase_date(make_card):
+    # Decision A: the purchase is the economic fact. The whole amount counts in
+    # the purchase month at that day's rate — cuotas are cash, not spending.
+    tx = add(p_amount=600000, p_payment_method=make_card(), p_installments=6).json()
+    row = rest_get("v_transactions", {"id": f"eq.{tx['id']}"})[0]
+    assert row["occurred_on"] == "2026-07-06"
+    assert abs(float(row["net_amount_usd"]) - 600000 / float(row["usd_rate"])) < 0.01
+
+
+def test_one_installment_stores_no_plan(make_card):
+    tx = add(p_payment_method=make_card(), p_installments=1).json()
+    assert plan_of(tx["id"]) == []
+
+
+def test_add_transaction_without_installments_unchanged(make_card):
+    # Hermes and the form never send p_installments; they must keep working.
+    r = add(p_payment_method=make_card())
+    assert r.status_code == 200, r.text
+    assert plan_of(r.json()["id"]) == []
+
+
+def test_installments_need_credit_card():
+    r = add(p_payment_method="Cash ARS", p_installments=3)
+    assert r.status_code == 400
+    assert "valid credit cards" in r.json()["message"]
+
+
+def test_installments_need_payment_method():
+    r = add(p_installments=3)
+    assert r.status_code == 400
+    assert "valid credit cards" in r.json()["message"]
+
+
+def test_installments_only_on_outflows(make_card):
+    r = add(p_type="inflow", p_category="Reintegros",
+            p_payment_method=make_card(), p_installments=3)
+    assert r.status_code == 400
+    assert "only applies to outflows" in r.json()["message"]
+
+
+@pytest.mark.parametrize("n", [0, 61])
+def test_installments_out_of_range(make_card, n):
+    r = add(p_payment_method=make_card(), p_installments=n)
+    assert r.status_code == 400
+    assert "between 1 and 60" in r.json()["message"]
