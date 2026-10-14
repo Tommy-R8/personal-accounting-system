@@ -3,6 +3,7 @@ and are cleaned up by the session fixture. Run from repo root:
     python -m pytest scripts/test_smoke.py -v
 """
 from datetime import date
+import uuid
 
 import psycopg
 import pytest
@@ -525,3 +526,86 @@ def test_batch_size_outside_band_envelope_is_rejected(invoicing_cfg):
     r = rpc("suggest_invoice_batch", {})
     assert r.status_code == 400
     assert "batch_size" in r.json()["message"]
+
+# --- Task 10: cards + real cycles ---------------------------------------------
+
+@pytest.fixture
+def make_card():
+    """Factory for throwaway credit cards. Each test gets its own card so
+    cycles and purchases of one test never shift another test's calendar."""
+    ids = []
+
+    def _make(closing_day=20, due_day=5):
+        name = f"Test Card {uuid.uuid4().hex[:8]}"
+        with db_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                """insert into payment_methods
+                     (name, is_credit_card, default_closing_day, default_due_day)
+                   values (%s, true, %s, %s) returning id""",
+                (name, closing_day, due_day),
+            )
+            ids.append(cur.fetchone()[0])
+        return name
+
+    yield _make
+    with db_conn() as conn, conn.cursor() as cur:
+        for pm_id in ids:
+            cur.execute("delete from transactions where payment_method_id = %s", (pm_id,))
+            cur.execute("delete from card_cycles where payment_method_id = %s", (pm_id,))
+            cur.execute("delete from payment_methods where id = %s", (pm_id,))
+
+
+def add_cycle(card, closing, due):
+    return rpc("add_card_cycle", {"p_payment_method": card, "p_closing_date": closing,
+                                  "p_due_date": due, "p_source": "test"})
+
+
+def test_card_flag_requires_default_days():
+    # Estimated cycles need both days; a card without them would silently vanish
+    # from every projection.
+    with db_conn() as conn, conn.cursor() as cur:
+        with pytest.raises(psycopg.errors.CheckViolation):
+            cur.execute("""insert into payment_methods (name, is_credit_card)
+                           values ('Test Card no days', true)""")
+        conn.rollback()
+
+
+def test_add_card_cycle_rejects_non_card():
+    r = add_cycle("Cash ARS", "2027-01-20", "2027-02-05")
+    assert r.status_code == 400
+    assert "valid credit cards" in r.json()["message"]
+
+
+def test_add_card_cycle_rejects_due_not_after_closing(make_card):
+    r = add_cycle(make_card(), "2027-01-20", "2027-01-20")
+    assert r.status_code == 400
+    assert "must be after" in r.json()["message"]
+
+
+def test_add_card_cycle_resolves_name_case_insensitively(make_card):
+    # Agents type card names as the owner says them ("bbva crédito").
+    card = make_card()
+    r = add_cycle(card.upper(), "2027-01-20", "2027-02-05")
+    assert r.status_code == 200, r.text
+
+
+def test_add_card_cycle_replaces_same_month(make_card):
+    # A statement's "próximo cierre" is a forecast; the next statement's actual
+    # date must replace it, not sit next to it.
+    card = make_card()
+    assert add_cycle(card, "2027-01-28", "2027-02-10").status_code == 200
+    r = add_cycle(card, "2027-01-29", "2027-02-11")
+    assert r.status_code == 200, r.text
+    pm_id = r.json()["payment_method_id"]
+    rows = rest_get("card_cycles", {"payment_method_id": f"eq.{pm_id}",
+                                    "select": "closing_date,due_date"})
+    assert rows == [{"closing_date": "2027-01-29", "due_date": "2027-02-11"}]
+
+
+def test_add_card_cycle_keeps_other_months(make_card):
+    card = make_card()
+    add_cycle(card, "2027-01-28", "2027-02-10")
+    r = add_cycle(card, "2027-02-25", "2027-03-10")
+    pm_id = r.json()["payment_method_id"]
+    rows = rest_get("card_cycles", {"payment_method_id": f"eq.{pm_id}", "select": "id"})
+    assert len(rows) == 2
