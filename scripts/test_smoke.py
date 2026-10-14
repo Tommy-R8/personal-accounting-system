@@ -759,3 +759,60 @@ def test_statements_total_by_currency(make_card):
                                           "order": "currency"})
     assert [(r["currency"], float(r["total"]), r["installment_count"]) for r in rows] == \
         [("ARS", 1500.0, 2), ("USD", 50.0, 1)]
+
+
+# --- Final review fixes ---------------------------------------------------------
+
+def test_add_card_cycle_resolves_accented_name_in_other_case(make_card):
+    # Real cards are named "Bank A Crédito"; agents may send "Bank A CRÉDITO".
+    card = make_card().replace("Test Card", "Test Crédito")
+    with db_conn() as conn, conn.cursor() as cur:
+        cur.execute("""update payment_methods set name = %s
+                        where name = %s""", (card, card.replace("Test Crédito", "Test Card")))
+    r = add_cycle(card.upper(), "2027-01-20", "2027-02-05")
+    assert r.status_code == 200, r.text
+
+
+def set_installments(tx_id, n):
+    return rpc("set_installments", {"p_transaction_id": tx_id, "p_installments": n})
+
+
+def test_set_installments_adds_plan_to_existing_purchase(make_card):
+    # The owner said "heladera 600000 con la Visa" and only the statement
+    # revealed it was 1/6: the schedule must spread it once corrected.
+    tx = add(p_amount=600000, p_payment_method=make_card()).json()
+    r = set_installments(tx["id"], 6)
+    assert r.status_code == 204, r.text  # void RPC
+    assert len(schedule(tx["id"])) == 6
+
+
+def test_set_installments_changes_existing_plan(make_card):
+    tx = add(p_amount=600000, p_payment_method=make_card(), p_installments=3).json()
+    assert set_installments(tx["id"], 6).status_code == 204
+    assert plan_of(tx["id"]) == [{"installments": 6}]
+
+
+def test_set_installments_one_removes_plan(make_card):
+    tx = add(p_payment_method=make_card(), p_installments=3).json()
+    assert set_installments(tx["id"], 1).status_code == 204
+    assert plan_of(tx["id"]) == []
+
+
+def test_set_installments_needs_card_purchase():
+    tx = add(p_payment_method="Cash ARS").json()
+    r = set_installments(tx["id"], 3)
+    assert r.status_code == 400
+    assert "valid credit cards" in r.json()["message"]
+
+
+def test_set_installments_unknown_transaction():
+    r = set_installments(str(uuid.uuid4()), 3)
+    assert r.status_code == 400
+    assert "not found" in r.json()["message"]
+
+
+def test_set_installments_out_of_range(make_card):
+    tx = add(p_payment_method=make_card()).json()
+    r = set_installments(tx["id"], 61)
+    assert r.status_code == 400
+    assert "between 1 and 60" in r.json()["message"]

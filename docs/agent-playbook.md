@@ -164,12 +164,18 @@ Fields: `monthly_target_ars`, `batch_size`, `batch_weekday` (ISO, 1 = Monday …
 
 - **Never record the payment of a card statement** ("pagué la Visa"). Every
   purchase on it is already recorded; tell the owner so.
-- "¿Cuánto pago de la Visa?" / "¿cuánto me viene el mes que viene?" →
-  `GET /rest/v1/v_card_statements?payment_method=eq.<Card>&closing_date=gte.<today>&order=closing_date&limit=2`
-  (one row per currency). `is_estimated = true` means the cycle dates are the
-  card's default days, not yet confirmed by a real statement.
-- "¿Cuánto tengo comprometido en cuotas?" → sum `installment_amount` from
-  `v_card_schedule` with `closing_date=gte.<today>` and `installments=gt.1`.
+- "¿Cuánto pago de la Visa?" → the statement being paid is the one with the
+  earliest `due_date` on or after today:
+  `GET /rest/v1/v_card_statements?payment_method=eq.<Card>&due_date=gte.<today>&order=due_date,currency`
+  Keep only the rows whose `closing_date` equals the first row's (one row per
+  currency). Report ARS and USD separately — never add them. "¿Y el mes que
+  viene?" = the rows of the next `closing_date`. `is_estimated = true` means the
+  cycle dates are the card's default days, not yet confirmed by a real statement.
+- "¿Cuánto tengo comprometido en cuotas?" → `run_report` with
+  `select currency, sum(installment_amount) as total from v_card_schedule where due_date >= current_date and installments > 1 group by currency`.
+- The owner corrects the cuotas of a purchase already logged ("era en 6
+  cuotas") → `POST /rest/v1/rpc/set_installments` with
+  `{"p_transaction_id": "<id>", "p_installments": 6}`; `1` removes the plan.
 - Purchase with interest: `p_amount` is the total of the cuotas; put the list
   price in `p_notes`.
 
@@ -188,9 +194,18 @@ Input: a bank/card statement (PDF, CSV, screenshot) + which payment method it is
    total is `cuota amount × n`, its date is the original purchase date printed
    on the line, and its `external_ref` is built from the **purchase**
    (`<method-slug>:<original date>:<total>:<merchant-slug>`), so every month's
-   cuota line maps to the same ref. Match it like any line but by original date
-   and total (± n pesos for rounding). Unmatched → propose it and insert with
-   `p_installments = n`.
+   cuota line maps to the same ref. The purchase usually predates the statement
+   window, so look it up separately, by original date, any method or none:
+   `GET /rest/v1/v_transactions?type=eq.outflow&occurred_on=gte.<date−1>&occurred_on=lte.<date+1>`
+   and match by total (± n pesos for rounding).
+   - Matched → if the row has no plan (`GET /rest/v1/installment_plans?transaction_id=eq.<id>`
+     is empty), propose `set_installments` with `n`; if it has no method, also
+     complete it as in step 9.
+   - Unmatched and `k > 1` → the purchase was probably logged with another
+     amount or date. Show it to the owner as "probably already logged" — do not
+     propose it as new.
+   - Unmatched and `k = 1` → propose it like any new line and insert it with
+     `p_installments = n`.
 5. Fetch what's already logged for that window — rows of this method **and**
    rows logged without a method (the owner often omits it):
    `GET /rest/v1/v_transactions?or=(payment_method.eq."<Method>",payment_method.is.null)&occurred_on=gte.<from>&occurred_on=lte.<to>`
