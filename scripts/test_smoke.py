@@ -367,7 +367,7 @@ def test_fiscal_balance_converts_usd_outflows_at_blue_sell():
 
 def test_monotributo_view_uses_latest_applicable_scale():
     d = next(r for r in rest_get("v_monotributo_status") if r["category"] == "D")
-    assert float(d["annual_cap"]) == 26212853.42  # 2026 scale, not 2025's 22934610.05
+    assert float(d["annual_cap"]) == 30628651.43  # July 2026 scale, not Jan 2026's 26212853.42
 
 
 def test_monotributo_view_ignores_future_scales():
@@ -376,7 +376,7 @@ def test_monotributo_view_ignores_future_scales():
         cur.execute("select annual_cap from v_monotributo_status where category = 'D'")
         cap = float(cur.fetchone()[0])
         conn.rollback()  # discard the future-dated row — no cleanup needed
-    assert cap == 26212853.42  # a scale that hasn't taken effect must be ignored
+    assert cap == 30628651.43  # a scale that hasn't taken effect must be ignored
 
 
 # --- Task 9: invoice batch suggestion -----------------------------------------
@@ -526,6 +526,42 @@ def test_batch_size_outside_band_envelope_is_rejected(invoicing_cfg):
     r = rpc("suggest_invoice_batch", {})
     assert r.status_code == 400
     assert "batch_size" in r.json()["message"]
+
+
+def test_batch_jitter_moves_target(invoicing_cfg):
+    # Without jitter every weekly sum sits on the same number, which looks fake.
+    cfg = set_target_per_batch(dict(invoicing_cfg, batch_jitter_pct=0.15), 600000)
+    if suggest()["batches_left"] == 1:
+        pytest.skip("last batch of the month: jitter is off by design, rerun another week")
+    targets = []
+    for _ in range(40):
+        out = suggest()
+        t = float(out["batch_target"])
+        assert 510000 <= t <= 690000, out
+        assert len(out["invoices"]) == cfg["batch_size"]
+        amounts = [float(i["amount_ars"]) for i in out["invoices"]]
+        if out["warning"] is None:  # drawn sum follows the jittered target
+            assert abs(sum(amounts) - t) <= cfg["round_to"] * len(amounts) / 2
+        targets.append(t)
+    assert len(set(targets)) > 5, targets
+
+
+def test_batch_jitter_never_shrinks_batch(invoicing_cfg):
+    # 460k is just above the 5-invoice floor (445k); a -15% swing must clamp, not drop to 4.
+    set_target_per_batch(dict(invoicing_cfg, batch_jitter_pct=0.15), 460000)
+    if suggest()["batches_left"] == 1:
+        pytest.skip("last batch of the month: jitter is off by design")
+    for _ in range(40):
+        out = suggest()
+        assert float(out["batch_target"]) >= 445000, out
+        assert len(out["invoices"]) == 5, out
+
+
+def test_batch_jitter_out_of_range_is_rejected(invoicing_cfg):
+    set_invoicing(dict(invoicing_cfg, batch_jitter_pct=1.5))
+    r = rpc("suggest_invoice_batch", {})
+    assert r.status_code == 400
+    assert "batch_jitter_pct" in r.json()["message"]
 
 # --- Task 10: cards + real cycles ---------------------------------------------
 

@@ -159,6 +159,9 @@ Fields: `monthly_target_ars`, `batch_size`, `batch_weekday` (ISO, 1 = Monday …
 7 = Sunday), `round_to`, and `bands` — each with `concept`, `min`, `max`,
 `count_min`, `count_max`. `batch_size` must lie between the sum of the bands'
 `count_min` and the sum of their `count_max`; the RPC tells you if it doesn't.
+Optional `batch_jitter_pct` (0 to <1, e.g. 0.15) moves each `batch_target` by
+up to ±that fraction so weekly sums vary; the month's last batch is never
+jittered, so the month still lands on target.
 
 ## Credit card statements
 
