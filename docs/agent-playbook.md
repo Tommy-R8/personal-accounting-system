@@ -162,6 +162,10 @@ Fields: `monthly_target_ars`, `batch_size`, `batch_weekday` (ISO, 1 = Monday …
 Optional `batch_jitter_pct` (0 to <1, e.g. 0.15) moves each `batch_target` by
 up to ±that fraction so weekly sums vary; the month's last batch is never
 jittered, so the month still lands on target.
+Optional `batch_size_max` (≥ `batch_size`, ≤ the sum of the bands'
+`count_max`) lets a heavy week add invoices beyond `batch_size`, one at a
+time and only while `batch_target` is out of reach; extras go to any band with
+`count_max` room. Missing = `batch_size` (the batch is capped with a warning).
 
 ## Credit card statements
 

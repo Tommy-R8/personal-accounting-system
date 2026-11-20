@@ -563,6 +563,42 @@ def test_batch_jitter_out_of_range_is_rejected(invoicing_cfg):
     assert r.status_code == 400
     assert "batch_jitter_pct" in r.json()["message"]
 
+
+def test_batch_grows_only_when_target_out_of_reach(invoicing_cfg):
+    # Heavy weeks (4-Friday months) need more than 5 invoices can reach; normal
+    # weeks must stay at batch_size so the invoice count doesn't creep up.
+    cfg = set_target_per_batch(dict(invoicing_cfg, batch_size_max=6), 600000)
+    for _ in range(20):
+        assert len(suggest()["invoices"]) == 5
+    # ceil(5) = 2*200k + 2*120k + 200k = 840k; ceil(6) adds one 120k = 960k.
+    # 870k: past ceil(5), not capped at 6. (Sums near a ceiling are hard to draw,
+    # so "tolerance not met" may show; the next batch absorbs the difference.)
+    set_target_per_batch(cfg, 870000)
+    for _ in range(20):
+        out = suggest()
+        assert "capped" not in (out["warning"] or ""), out
+        assert float(out["batch_target"]) == 870000
+        inv = out["invoices"]
+        assert len(inv) == 6
+        for b in cfg["bands"]:
+            assert b["count_min"] <= sum(1 for i in inv if i["concept"] == b["concept"]) <= b["count_max"]
+
+
+def test_batch_size_max_still_caps_past_its_ceiling(invoicing_cfg):
+    set_target_per_batch(dict(invoicing_cfg, batch_size_max=6), 5000000)
+    out = suggest()
+    assert float(out["batch_target"]) == 960000
+    assert "capped at 960000" in out["warning"]
+    assert len(out["invoices"]) == 6
+
+
+@pytest.mark.parametrize("size_max", [4, 7])  # below batch_size; above sum of count_max (6)
+def test_batch_size_max_out_of_range_is_rejected(invoicing_cfg, size_max):
+    set_invoicing(dict(invoicing_cfg, batch_size_max=size_max))
+    r = rpc("suggest_invoice_batch", {})
+    assert r.status_code == 400
+    assert "batch_size_max" in r.json()["message"]
+
 # --- Task 10: cards + real cycles ---------------------------------------------
 
 @pytest.fixture
